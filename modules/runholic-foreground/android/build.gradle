@@ -1,0 +1,33 @@
+plugins {
+  id 'com.android.library'
+  id 'org.jetbrains.kotlin.android'
+}
+
+group = 'com.starbion.runholicforeground'
+version = '1.0.0'
+
+def expoModulesCorePlugin = new File(
+  project(":expo-modules-core").projectDir,
+  "ExpoModulesCorePlugin.gradle"
+)
+apply from: expoModulesCorePlugin
+
+android {
+  namespace "com.starbion.runholicforeground"
+  compileSdkVersion rootProject.ext.compileSdkVersion
+
+  defaultConfig {
+    minSdkVersion rootProject.ext.minSdkVersion
+    targetSdkVersion rootProject.ext.targetSdkVersion
+  }
+
+  lintOptions {
+    abortOnError false
+  }
+}
+
+dependencies {
+  implementation project(":expo-modules-core")
+  implementation "org.jetbrains.kotlin:kotlin-stdlib:${rootProject.ext.kotlinVersion}"
+  implementation "com.google.android.gms:play-services-location:21.3.0"
+}

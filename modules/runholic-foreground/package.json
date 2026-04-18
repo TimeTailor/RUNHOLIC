@@ -1,0 +1,6 @@
+{
+  "name": "runholic-foreground",
+  "version": "1.0.0",
+  "main": "index",
+  "types": "index.ts"
+}
