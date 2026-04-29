@@ -13,10 +13,6 @@ let isLoaded = false;
 let isShowing = false;
 let pendingOnFinished: (() => void) | null = null;
 
-export const bannerUnitId = __DEV__
-  ? TestIds.BANNER
-  : "ca-app-pub-9213010752576483/8755226096";
-
 export function loadInterstitial() {
   if (interstitial) return;
 

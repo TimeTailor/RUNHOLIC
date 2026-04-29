@@ -125,6 +125,7 @@ class RunTrackingService : Service() {
             ACTION_RESUME -> handleResume()
             ACTION_STOP -> handleStop()
             ACTION_ENSURE_NOTIFICATION -> handleEnsureNotification()
+            ACTION_UPDATE_TARGET -> handleUpdateTarget(intent)
             else -> {
                 if (RunSessionStore.snapshot().isRunning) {
                     refreshForegroundNotification()
@@ -189,6 +190,21 @@ class RunTrackingService : Service() {
         mainHandler.postDelayed({
             enqueueReportTts("run_start", "러닝을 시작합니다.")
         }, 180L)
+        emitSessionUpdate()
+    }
+
+    private fun handleUpdateTarget(intent: Intent) {
+        val nextTargetDistanceKm =
+            if (intent.hasExtra(EXTRA_TARGET_DISTANCE_KM)) {
+                intent.getDoubleExtra(EXTRA_TARGET_DISTANCE_KM, -1.0)
+                    .takeIf { it >= 0.0 }
+            } else {
+                null
+            }
+
+        RunSessionStore.updateTargetDistance(nextTargetDistanceKm)
+
+        refreshForegroundNotification()
         emitSessionUpdate()
     }
 
@@ -412,6 +428,7 @@ class RunTrackingService : Service() {
             putExtra("isRunning", snapshot.isRunning)
             putExtra("isPaused", snapshot.isPaused)
             putExtra("startedAt", snapshot.startedAt)
+            putExtra("endedAt", snapshot.endedAt)
 
             putExtra("elapsedMs", snapshot.elapsedMs)
             putExtra("durationSec", snapshot.durationSec)
@@ -555,6 +572,9 @@ class RunTrackingService : Service() {
             "com.starbion.runholicforeground.action.ENSURE_NOTIFICATION"
         const val ACTION_SESSION_UPDATE =
             "com.starbion.runholicforeground.action.SESSION_UPDATE"
+
+        const val ACTION_UPDATE_TARGET =
+            "com.starbion.runholicforeground.action.UPDATE_TARGET"
 
         const val EXTRA_SESSION_ID = "sessionId"
         const val EXTRA_TARGET_DISTANCE_KM = "targetDistanceKm"

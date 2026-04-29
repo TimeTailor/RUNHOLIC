@@ -23,6 +23,7 @@ class RunholicForegroundModule : Module() {
             payload["isRunning"] = intent.getBooleanExtra("isRunning", false)
             payload["isPaused"] = intent.getBooleanExtra("isPaused", false)
             payload["startedAt"] = intent.getLongExtra("startedAt", 0L).toDouble()
+            payload["endedAt"] = intent.getLongExtra("endedAt", 0L).toDouble()
 
             payload["elapsedMs"] = intent.getLongExtra("elapsedMs", 0L).toDouble()
             payload["durationSec"] = intent.getLongExtra("durationSec", 0L).toDouble()
@@ -169,6 +170,18 @@ class RunholicForegroundModule : Module() {
             val context = requireContext()
             RunholicTTSManager.init(context)
             RunholicTTSManager.updateSettings(reportEnabled, coachEnabled)
+            true
+        }
+
+        AsyncFunction("updateTargetDistance") { targetDistanceKm: Double ->
+            val context = requireContext()
+
+            val intent = Intent(context, RunTrackingService::class.java).apply {
+                action = RunTrackingService.ACTION_UPDATE_TARGET
+                putExtra(RunTrackingService.EXTRA_TARGET_DISTANCE_KM, targetDistanceKm)
+            }
+
+            ContextCompat.startForegroundService(context, intent)
             true
         }
     }

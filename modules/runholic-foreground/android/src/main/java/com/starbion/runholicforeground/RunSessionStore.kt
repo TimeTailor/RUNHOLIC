@@ -17,12 +17,17 @@ object RunSessionStore {
     private const val GPS_LOSS_AUTO_PAUSE_KEY = "gps_signal_lost_pause"
 
     private const val VALID_GPS_ACCURACY_METERS = 40.0
-    private const val GPS_LOSS_AUTO_PAUSE_TIMEOUT_MS = 35_000L
+    private const val PENDING_JUMP_DISTANCE_METERS = 45.0
+    private const val PENDING_JUMP_MAX_SPEED_MPS = 9.0
+    private const val PENDING_RETURN_NEAR_LAST_METERS = 25.0
+    private const val PENDING_CONFIRMED_NEAR_METERS = 18.0
+    private const val GPS_LOSS_AUTO_PAUSE_TIMEOUT_MS = 40_000L
 
     private var sessionId: String? = null
     private var isRunning = false
     private var isPaused = false
     private var startedAt = 0L
+    private var endedAt = 0L
 
     private var pausedAccumulatedMs = 0L
     private var pauseStartedAtMs: Long? = null
@@ -41,13 +46,12 @@ object RunSessionStore {
     private var calories = 0.0
     private var netElevationMeters = 0.0
 
-    // 고도 10m 구간 집계용
+    // 고도 20m 구간 집계용
     private var elevationSegmentDistanceAccum = 0.0
     private val elevationSegmentAltSamples = mutableListOf<Double>()
     private var previousElevationSegmentMedianAlt: Double? = null
 
-    private var pendingElevationGainMeters = 0.0
-    private var pendingElevationLossMeters = 0.0
+    private var pendingElevationNetMeters = 0.0
 
     private var targetDistanceKm: Double? = null
     private var aiCoachAnalysis = DEFAULT_ANALYSIS
@@ -57,6 +61,7 @@ object RunSessionStore {
     private var routeSegments = mutableListOf<MutableList<RoutePointState>>()
     private var splits = mutableListOf<RunSplitState>()
     private var lastPoint: RoutePointState? = null
+    private var pendingJumpPoint: RoutePointState? = null
 
     private var lastSplitDistanceKm = 0.0
     private var lastSplitElapsedSec = 0L
@@ -445,6 +450,7 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         isRunning = true
         isPaused = false
         startedAt = now
+        endedAt = 0L
 
         pausedAccumulatedMs = 0L
         pauseStartedAtMs = null
@@ -474,6 +480,7 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         )
         splits.clear()
         lastPoint = currentLocation
+        pendingJumpPoint = null
         startupAnchorPoint = currentLocation
         startupMapLastPoint = currentLocation
         startupDistanceCredited = false
@@ -513,8 +520,32 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         elevationSegmentDistanceAccum = 0.0
         elevationSegmentAltSamples.clear()
         previousElevationSegmentMedianAlt = null
-        pendingElevationGainMeters = 0.0
-        pendingElevationLossMeters = 0.0
+        pendingElevationNetMeters = 0.0
+    }
+
+    fun updateTargetDistance(nextTargetDistanceKm: Double?) {
+        targetDistanceKm = nextTargetDistanceKm
+
+        val currentKm = distanceMeters / 1000.0
+
+        if (nextTargetDistanceKm == null) {
+            hasAnnouncedFinal200m = false
+            hasAnnouncedLast500m = false
+            hasAnnouncedTargetReached = false
+            return
+        }
+
+        if (currentKm < nextTargetDistanceKm) {
+            hasAnnouncedTargetReached = false
+        }
+
+        if (currentKm < nextTargetDistanceKm - 0.2) {
+            hasAnnouncedFinal200m = false
+        }
+
+        if (currentKm < nextTargetDistanceKm - 0.5) {
+            hasAnnouncedLast500m = false
+        }
     }
 
     fun pause() {
@@ -527,6 +558,7 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         isPaused = true
         pauseStartedAtMs = now
         ignorePointsBeforeTs = now
+        pendingJumpPoint = null
     }
 
     fun autoPauseByGpsLoss(lostAtMs: Long) {
@@ -550,6 +582,7 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         gpsSignalLostAtMs = lostAtMs
         autoPausedByGpsLoss = true
         gpsLossNoticePending = true
+        pendingJumpPoint = null
     }
 
     fun resume(currentLocation: RoutePointState? = null) {
@@ -575,11 +608,11 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         elevationSegmentDistanceAccum = 0.0
         elevationSegmentAltSamples.clear()
         previousElevationSegmentMedianAlt = null
-        pendingElevationGainMeters = 0.0
-        pendingElevationLossMeters = 0.0
+        pendingElevationNetMeters = 0.0
 
         if (currentLocation != null) {
             lastPoint = currentLocation
+            pendingJumpPoint = null
             if (routeSegments.isEmpty()) {
                 routeSegments.add(mutableListOf(currentLocation))
             } else {
@@ -600,6 +633,7 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
 
         val now = System.currentTimeMillis()
         elapsedMs = computeElapsedMs(now)
+        endedAt = now
 
         if (currentLocation != null) {
             lastPoint = currentLocation
@@ -646,6 +680,7 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         isRunning = false
         isPaused = false
         pauseStartedAtMs = null
+        pendingJumpPoint = null
     }
 
     fun clear() {
@@ -653,6 +688,7 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         isRunning = false
         isPaused = false
         startedAt = 0L
+        endedAt = 0L
         pausedAccumulatedMs = 0L
         pauseStartedAtMs = null
         elapsedMs = 0L
@@ -668,8 +704,7 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         elevationSegmentDistanceAccum = 0.0
         elevationSegmentAltSamples.clear()
         previousElevationSegmentMedianAlt = null
-        pendingElevationGainMeters = 0.0
-        pendingElevationLossMeters = 0.0
+        pendingElevationNetMeters = 0.0
 
         cadence = 0.0
         calories = 0.0
@@ -680,6 +715,7 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         routeSegments.clear()
         splits.clear()
         lastPoint = null
+        pendingJumpPoint = null
         lastSplitDistanceKm = 0.0
         lastSplitElapsedSec = 0L
         lastSplitNetElevationM = 0.0
@@ -742,7 +778,55 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         if (elapsedSec < 10 && accuracy > 45.0) return
         if (!isValidAccuracy(point, elapsedSec)) return
 
-        if (prev != null && !isValidMovement(prev, point, elapsedSec)) return
+        var forceAcceptAfterPendingRecovery = false
+
+        if (prev != null) {
+            val pending = pendingJumpPoint
+
+            if (pending != null) {
+                val distanceFromPrevToCurrent = calcDistanceMeters(prev, point)
+                val distanceFromPendingToCurrent = calcDistanceMeters(pending, point)
+
+                when {
+                    // A로 복귀 → B 폐기
+                    distanceFromPrevToCurrent <= PENDING_RETURN_NEAR_LAST_METERS -> {
+                        pendingJumpPoint = null
+                        forceAcceptAfterPendingRecovery = true
+                    }
+
+                    // B쪽으로 이어짐 → 새 세그먼트 시작
+                    distanceFromPendingToCurrent <= PENDING_CONFIRMED_NEAR_METERS -> {
+                        pendingJumpPoint = null
+                        appendNewRouteSegment(point)
+                        lastPoint = point
+
+                        if (accuracy <= VALID_GPS_ACCURACY_METERS) {
+                            lastValidGpsAtMs =
+                                point.timestamp.takeIf { it > 0L } ?: System.currentTimeMillis()
+                            gpsSignalLostAtMs = null
+                        }
+
+                        return
+                    }
+
+                    else -> {
+                        pendingJumpPoint = point
+                        return
+                    }
+                }
+            }
+
+            if (!forceAcceptAfterPendingRecovery && isSuspiciousJump(prev, point)) {
+                pendingJumpPoint = point
+                return
+            }
+
+            if (!forceAcceptAfterPendingRecovery && !isValidMovement(prev, point, elapsedSec)) {
+                if (!isRecoverableMovement(prev, point, elapsedSec)) {
+                    return
+                }
+            }
+        }
 
         if (!startupDistanceCredited) {
             val anchor = startupAnchorPoint
@@ -866,11 +950,7 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
             gpsSignalLostAtMs = null
         }
 
-        val before = pendingAnnouncements.size
-        enqueueSpecialDistanceAnnouncement()
-        if (pendingAnnouncements.size == before) {
-            enqueueKmAnnouncement()
-        }
+        enqueueDistanceAnnouncements()
     }
 
     private fun updateStillState(prev: RoutePointState?, next: RoutePointState) {
@@ -891,7 +971,7 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         val speedMps = distanceM / deltaSec
 
         // 사실상 정지 상태
-        val isStill = distanceM < 3.0 && speedMps < 0.8
+        val isStill = distanceM < 8.0 && speedMps < 1.2
 
         if (isStill) {
             if (recentStillSinceMs == null) {
@@ -916,14 +996,16 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
     ): Boolean {
         if (!isRunning || isPaused) return false
 
-        // 정지 상태면 자동정지 안 함
         val stillSince = recentStillSinceMs
-        if (stillSince != null && nowMs - stillSince >= 8000L) {
+        val isStill = stillSince != null && (nowMs - stillSince) >= 3000L
+
+        // 정지 상태면 GPS loss 자동정지 무시
+        if (isStill) {
             return false
         }
 
-        // 🔥 최근 움직임 있으면 자동정지 안 함 (추가)
-        if (nowMs - lastMovementDetectedAtMs < 5000L) {
+        // 최근 움직임 있으면 자동정지 안 함
+        if (nowMs - lastMovementDetectedAtMs < 15000L) {
             return false
         }
 
@@ -961,6 +1043,7 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
             isRunning = isRunning,
             isPaused = isPaused,
             startedAt = startedAt,
+            endedAt = endedAt,
             resumedAt = resumedAtMs,
             elapsedMs = elapsedMs,
             durationSec = elapsedMs / 1000L,
@@ -999,6 +1082,31 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
     private fun appendRoute(point: RoutePointState) {
         if (routeSegments.isEmpty()) routeSegments.add(mutableListOf())
         routeSegments.last().add(point)
+    }
+
+    private fun appendNewRouteSegment(point: RoutePointState) {
+        routeSegments.add(mutableListOf(point))
+    }
+
+    private fun getDeltaSec(a: RoutePointState, b: RoutePointState): Double {
+        val aTs = a.timestamp
+        val bTs = b.timestamp
+
+        return if (aTs > 0L && bTs > 0L) {
+            max(0.1, (bTs - aTs) / 1000.0)
+        } else {
+            1.0
+        }
+    }
+
+    private fun isSuspiciousJump(prev: RoutePointState, next: RoutePointState): Boolean {
+        val distanceM = calcDistanceMeters(prev, next)
+        if (distanceM < PENDING_JUMP_DISTANCE_METERS) return false
+
+        val deltaSec = getDeltaSec(prev, next)
+        val speedMps = distanceM / deltaSec
+
+        return speedMps > PENDING_JUMP_MAX_SPEED_MPS || distanceM > 80.0
     }
 
     private fun isInStartupMapOnlyWindow(point: RoutePointState): Boolean {
@@ -1081,8 +1189,7 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         pendingAnnouncements.add(item)
     }
 
-    private fun enqueueSpecialDistanceAnnouncement() {
-        val announcement = buildSpecialDistanceAnnouncement()
+    private fun enqueueSpecialDistanceAnnouncement(announcement: SpecialAnnouncement) {
         if (!announcement.shouldAnnounce || announcement.type == null) return
 
         when (announcement.type) {
@@ -1100,16 +1207,10 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
             )
         )
 
-        when (announcement.type) {
-            "halfKm" -> hasAnnouncedHalfKm = true
-            "last500m" -> hasAnnouncedLast500m = true
-            "final200m" -> hasAnnouncedFinal200m = true
-            "targetReached" -> hasAnnouncedTargetReached = true
-        }
+        markSpecialAnnounced(announcement.type)
     }
 
-    private fun enqueueKmAnnouncement() {
-        val announcement = buildKmAnnouncement()
+    private fun enqueueKmAnnouncement(announcement: KmAnnouncement) {
         if (!announcement.shouldAnnounce) return
         if (announcement.km <= lastAnnouncedKm) return
 
@@ -1124,8 +1225,86 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         lastAnnouncedKm = announcement.km
     }
 
+    private fun enqueueDistanceAnnouncements() {
+        val kmAnn = buildKmAnnouncement()
+        val specialAnn = buildSpecialDistanceAnnouncement()
+
+        val hasKm = kmAnn.shouldAnnounce
+        val hasSpecial = specialAnn.shouldAnnounce && specialAnn.type != null
+
+        when {
+            hasKm && hasSpecial -> {
+                enqueuePendingAnnouncement(
+                    SpeechAnnouncementState(
+                        key = "km_${kmAnn.km}",
+                        reportText = kmAnn.reportText,
+                        coachText = null,
+                    )
+                )
+                lastAnnouncedKm = kmAnn.km
+
+                enqueuePendingAnnouncement(
+                    SpeechAnnouncementState(
+                        key = "special_${specialAnn.type}",
+                        reportText = shortSpecialReportText(specialAnn.type),
+                        coachText = if (specialAnn.type == "targetReached") {
+                            null
+                        } else {
+                            specialAnn.coachText
+                        },
+                    )
+                )
+
+                markSpecialAnnounced(specialAnn.type)
+            }
+
+            hasKm -> {
+                enqueueKmAnnouncement(kmAnn)
+            }
+
+            hasSpecial -> {
+                enqueueSpecialDistanceAnnouncement(specialAnn)
+            }
+        }
+    }
+
+    private fun shortSpecialReportText(type: String?): String {
+        return when (type) {
+            "halfKm" -> "500미터 지났습니다."
+            "last500m" -> "마지막 500미터입니다."
+            "final200m" -> "마지막 200미터입니다."
+            "targetReached" -> "축하합니다. 설정한 목표 지점을 통과했습니다. 앱 집계는 이어지므로 계속 달리셔도 됩니다."
+            else -> ""
+        }
+    }
+
+    private fun markSpecialAnnounced(type: String?) {
+        when (type) {
+            "halfKm" -> hasAnnouncedHalfKm = true
+            "last500m" -> hasAnnouncedLast500m = true
+            "final200m" -> hasAnnouncedFinal200m = true
+            "targetReached" -> hasAnnouncedTargetReached = true
+        }
+    }
+
     private fun buildSpecialDistanceAnnouncement(): SpecialAnnouncement {
         if (!hasAnnouncedHalfKm && distanceMeters / 1000.0 >= 0.5) {
+            val nowMs = System.currentTimeMillis()
+            val isResumeGraceForSpeech =
+                resumedAtMs > 0L && nowMs - resumedAtMs < 5000L
+
+            val speechCurrentPace =
+                if (
+                    isResumeGraceForSpeech ||
+                    currentPaceSec <= 0.0 ||
+                    !currentPaceSec.isFinite() ||
+                    currentPaceSec > 3600.0
+                ) {
+                    avgPaceSec
+                } else {
+                    currentPaceSec
+                }
+
             val isEarlyPhase = elapsedMs / 1000L < 180L
             val coachText = if (paceState == "가속") {
                 pickRandom(
@@ -1156,7 +1335,7 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
             return SpecialAnnouncement(
                 shouldAnnounce = true,
                 type = "halfKm",
-                reportText = "500미터 지났습니다. 지금 페이스는 ${formatPaceForSpeech(if (currentPaceSec > 0) currentPaceSec else avgPaceSec)}입니다.",
+                reportText = "500미터 지났습니다. 현재 페이스는 ${formatPaceForSpeech(speechCurrentPace)}. 전체 평균 페이스는 ${formatPaceForSpeech(avgPaceSec)}입니다.",
                 coachText = coachText,
             )
         }
@@ -1165,12 +1344,17 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
             ?: return SpecialAnnouncement(false, null, "", "")
 
         if (distanceMeters / 1000.0 >= target && !hasAnnouncedTargetReached) {
-            return SpecialAnnouncement(true, "targetReached", "설정한 목표 지점을 통과했습니다.", "")
+            return SpecialAnnouncement(true, "targetReached", "축하합니다. 설정한 목표 지점을 통과했습니다. 앱 집계는 이어지므로 계속 달리셔도 됩니다.", "")
         }
 
         val remaining = target - distanceMeters / 1000.0
 
-        if (remaining > 0.0 && remaining <= 0.2 && !hasAnnouncedFinal200m) {
+        if (
+            target > 1.0 &&
+            remaining > 0.0 &&
+            remaining <= 0.2 &&
+            !hasAnnouncedFinal200m
+        ) {
             val coach = when (paceState) {
                 "가속" -> pickRandom(listOf(
                     "지금 속도를 유지하되 무리하지 않게 마무리하세요.",
@@ -1191,7 +1375,12 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
             return SpecialAnnouncement(true, "final200m", "마지막 200미터입니다.", coach)
         }
 
-        if (remaining > 0.2 && remaining <= 0.5 && !hasAnnouncedLast500m) {
+        if (
+            target > 1.0 &&
+            remaining > 0.2 &&
+            remaining <= 0.5 &&
+            !hasAnnouncedLast500m
+        ) {
             val coach = when (paceState) {
                 "가속" -> pickRandom(listOf(
                     "페이스를 조금만 정리하면서 마무리를 준비해 보세요.",
@@ -1209,7 +1398,31 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
                     "안정적인 페이스로 끝까지 이어가 보세요."
                 ))
             }
-            return SpecialAnnouncement(true, "last500m", "마지막 500미터입니다.", coach)
+            val elapsedSec = elapsedMs / 1000L
+            val durationText = formatDurationForSpeech(elapsedSec)
+
+            val nowMs = System.currentTimeMillis()
+            val isResumeGraceForSpeech =
+                resumedAtMs > 0L && nowMs - resumedAtMs < 5000L
+
+            val speechCurrentPace =
+                if (
+                    isResumeGraceForSpeech ||
+                    currentPaceSec <= 0.0 ||
+                    !currentPaceSec.isFinite() ||
+                    currentPaceSec > 3600.0
+                ) {
+                    avgPaceSec
+                } else {
+                    currentPaceSec
+                }
+
+            return SpecialAnnouncement(
+                true,
+                "last500m",
+                "마지막 500미터입니다. 러닝 시간은 ${durationText}입니다. 현재 페이스는 ${formatPaceForSpeech(speechCurrentPace)}. 전체 평균 페이스는 ${formatPaceForSpeech(avgPaceSec)}입니다.",
+                coach
+            )
         }
 
         return SpecialAnnouncement(false, null, "", "")
@@ -1220,11 +1433,36 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         if (completedKm < 1) return KmAnnouncement(false, 0, "", "")
         if (completedKm <= lastAnnouncedKm) return KmAnnouncement(false, 0, "", "")
 
+        val elapsedSec = elapsedMs / 1000L
+        val durationText = formatDurationForSpeech(elapsedSec)
+
+        val nowMs = System.currentTimeMillis()
+        val isResumeGraceForSpeech =
+            resumedAtMs > 0L && nowMs - resumedAtMs < 5000L
+
+        val speechCurrentPace =
+            if (
+                isResumeGraceForSpeech ||
+                currentPaceSec <= 0.0 ||
+                !currentPaceSec.isFinite() ||
+                currentPaceSec > 3600.0
+            ) {
+                avgPaceSec
+            } else {
+                currentPaceSec
+            }
+
         val reportText = buildString {
             append("${completedKm}킬로미터 지났습니다. ")
-            append("현재까지 ${formatDurationForSpeech(elapsedMs / 1000L)}. ")
-            append("지금 페이스는 ${formatPaceForSpeech(if (currentPaceSec > 0) currentPaceSec else avgPaceSec)}. ")
-            append("평균은 ${formatPaceForSpeech(avgPaceSec)}입니다.")
+
+            if (elapsedSec >= 5) {
+                append("러닝 시간은 ")
+                append(durationText)
+                append("입니다. ")
+            }
+
+            append("현재 페이스는 ${formatPaceForSpeech(speechCurrentPace)}. ")
+            append("전체 평균 페이스는 ${formatPaceForSpeech(avgPaceSec)}입니다.")
         }
 
         return KmAnnouncement(
@@ -1254,12 +1492,12 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         repeat(5) {
             val parts = mutableListOf<String>()
 
-            parts.add(pickRandom(pool.observation))
-            parts.add(pickRandom(pool.interpretation))
-
             if (avgHints.isNotEmpty() && Random.nextDouble() < 0.6) {
                 parts.add(pickRandom(avgHints))
             }
+
+            parts.add(pickRandom(pool.observation))
+            parts.add(pickRandom(pool.interpretation))
 
             if (runnerTrait != "미분류" && Random.nextDouble() < 0.35) {
                 val hints = personalHints[runnerTrait]
@@ -1279,12 +1517,13 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         }
 
         val fallbackParts = mutableListOf<String>()
-        fallbackParts.add(pickRandom(pool.observation))
-        fallbackParts.add(pickRandom(pool.interpretation))
 
         if (avgHints.isNotEmpty()) {
             fallbackParts.add(pickRandom(avgHints))
         }
+
+        fallbackParts.add(pickRandom(pool.observation))
+        fallbackParts.add(pickRandom(pool.interpretation))
 
         if (runnerTrait != "미분류" && Random.nextDouble() < 0.35) {
             val hints = personalHints[runnerTrait]
@@ -1337,6 +1576,43 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         return true
     }
 
+    private fun isRecoverableMovement(
+        prev: RoutePointState,
+        next: RoutePointState,
+        elapsedSec: Int
+    ): Boolean {
+        val distanceM = calcDistanceMeters(prev, next)
+        val prevTs = prev.timestamp
+        val nextTs = next.timestamp
+        val deltaSec =
+            if (prevTs > 0L && nextTs > 0L) (nextTs - prevTs) / 1000.0 else 1.0
+
+        // 너무 긴 시간차는 회복 판정으로 안 본다
+        if (deltaSec <= 0.0 || deltaSec > 4.5) return false
+
+        // 너무 짧은 이동도 회복으로 볼 필요 없다
+        if (distanceM < 1.0) return false
+
+        val isVeryEarly = elapsedSec < 10
+        val isWarmup = elapsedSec < 20
+
+        // 회복 판정은 일반 판정보다 "시간차"를 고려해서 조금 완화
+        val maxRecoverySpeedMps = when {
+            isVeryEarly -> 5.5
+            isWarmup -> 6.8
+            else -> 7.2
+        }
+
+        // 3~4초 누적 기준으로 말이 되는 거리인지 본다
+        if (distanceM / deltaSec > maxRecoverySpeedMps) return false
+
+        // 그래도 말도 안 되게 먼 점프는 회복으로 안 살린다
+        val maxRecoveryDistance = max(20.0, deltaSec * maxRecoverySpeedMps)
+        if (distanceM > maxRecoveryDistance) return false
+
+        return true
+    }
+
     private fun processElevationSegment(
         point: RoutePointState,
         segmentDistanceM: Double,
@@ -1351,7 +1627,10 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
             return ElevationSegmentUpdate(0.0, 0.0, 0.0)
         }
 
-        if (segmentDistanceM < 2.0) {
+        val elevationMinSegmentDistanceM =
+            if (currentPaceSec > 1200.0 || avgPaceSec > 1200.0) 2.8 else 2.2
+
+        if (segmentDistanceM < elevationMinSegmentDistanceM) {
             return ElevationSegmentUpdate(0.0, 0.0, 0.0)
         }
 
@@ -1363,7 +1642,7 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         elevationSegmentDistanceAccum += segmentDistanceM
         elevationSegmentAltSamples.add(altitude)
 
-        if (elevationSegmentDistanceAccum < 10.0) {
+        if (elevationSegmentDistanceAccum < 20.0) {
             return ElevationSegmentUpdate(0.0, 0.0, 0.0)
         }
 
@@ -1387,12 +1666,12 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         val rawDelta = currentMedianAlt - previousMedianAlt
 
         // 아주 작은 변화는 무시
-        if (kotlin.math.abs(rawDelta) < 0.3) {
+        if (kotlin.math.abs(rawDelta) < 0.4) {
             return ElevationSegmentUpdate(0.0, 0.0, 0.0)
         }
 
         // 비정상 큰 점프는 무시
-        if (kotlin.math.abs(rawDelta) > 3.0) {
+        if (kotlin.math.abs(rawDelta) > 10.0) {
             return ElevationSegmentUpdate(0.0, 0.0, 0.0)
         }
 
@@ -1400,22 +1679,18 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         var lossApplied = 0.0
         var netApplied = 0.0
 
-        if (rawDelta > 0) {
-            pendingElevationGainMeters += rawDelta
+        pendingElevationNetMeters += rawDelta
 
-            while (pendingElevationGainMeters >= 1.0) {
-                gainApplied += 1.0
-                netApplied += 1.0
-                pendingElevationGainMeters -= 1.0
-            }
-        } else if (rawDelta < 0) {
-            pendingElevationLossMeters += -rawDelta
+        while (pendingElevationNetMeters >= 1.0) {
+            gainApplied += 1.0
+            netApplied += 1.0
+            pendingElevationNetMeters -= 1.0
+        }
 
-            while (pendingElevationLossMeters >= 1.0) {
-                lossApplied += 1.0
-                netApplied -= 1.0
-                pendingElevationLossMeters -= 1.0
-            }
+        while (pendingElevationNetMeters <= -1.0) {
+            lossApplied += 1.0
+            netApplied -= 1.0
+            pendingElevationNetMeters += 1.0
         }
 
         return ElevationSegmentUpdate(
@@ -1447,11 +1722,11 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
 
         val rawDelta = currentMedianAlt - previousMedianAlt
 
-        if (kotlin.math.abs(rawDelta) < 0.3) {
+        if (kotlin.math.abs(rawDelta) < 0.4) {
             return ElevationSegmentUpdate(0.0, 0.0, 0.0)
         }
 
-        if (kotlin.math.abs(rawDelta) > 3.0) {
+        if (kotlin.math.abs(rawDelta) > 10.0) {
             return ElevationSegmentUpdate(0.0, 0.0, 0.0)
         }
 
@@ -1459,20 +1734,18 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
         var lossApplied = 0.0
         var netApplied = 0.0
 
-        if (rawDelta > 0) {
-            pendingElevationGainMeters += rawDelta
-            while (pendingElevationGainMeters >= 1.0) {
-                gainApplied += 1.0
-                netApplied += 1.0
-                pendingElevationGainMeters -= 1.0
-            }
-        } else if (rawDelta < 0) {
-            pendingElevationLossMeters += -rawDelta
-            while (pendingElevationLossMeters >= 1.0) {
-                lossApplied += 1.0
-                netApplied -= 1.0
-                pendingElevationLossMeters -= 1.0
-            }
+        pendingElevationNetMeters += rawDelta
+
+        while (pendingElevationNetMeters >= 1.0) {
+            gainApplied += 1.0
+            netApplied += 1.0
+            pendingElevationNetMeters -= 1.0
+        }
+
+        while (pendingElevationNetMeters <= -1.0) {
+            lossApplied += 1.0
+            netApplied -= 1.0
+            pendingElevationNetMeters += 1.0
         }
 
         return ElevationSegmentUpdate(
@@ -1540,7 +1813,7 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
     }
 
     private fun calculateRecentPaceFromRoute(route: List<RoutePointState>): Double {
-        val targets = listOf(20.0, 12.0, 8.0, 5.0)
+        val targets = listOf(20.0, 15.0, 10.0, 8.0)
         for (target in targets) {
             val pace = calculateRecentPaceByTarget(route, target)
             if (pace > 0.0) return pace
@@ -1631,12 +1904,12 @@ private val coachingPools: Map<String, Map<String, MessageBlock>> = mapOf(
 
         return when (previousState) {
             "가속" -> when {
-                diffRatio <= -0.06 -> "가속"   // 유지
+                diffRatio <= -0.08 -> "가속"  
                 diffRatio >= 0.12 -> "감속"
                 else -> "안정"
             }
             "감속" -> when {
-                diffRatio >= 0.06 -> "감속"   // 유지
+                diffRatio >= 0.08 -> "감속"   
                 diffRatio <= -0.12 -> "가속"
                 else -> "안정"
             }

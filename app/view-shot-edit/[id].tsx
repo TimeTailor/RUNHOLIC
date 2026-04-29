@@ -237,7 +237,7 @@ export default function ViewShotEditScreen() {
 
   const dateText = useMemo(() => {
     if (!run) return "";
-    return formatRunDateTimeRange(run.startedAt, run.duration);
+    return formatRunDateTimeRange(run.startedAt, run.endedAt);
   }, [run]);
 
   const coachHeadline = useMemo(() => {
@@ -667,7 +667,11 @@ function StaticShotCanvas({
         />
       ) : (
         <View style={canvas.emptyBackground}>
-          <Text style={canvas.emptyBackgroundText}>배경 사진을 선택하세요</Text>
+          <Text style={canvas.emptyBackgroundText}>
+            배경 사진을 선택하세요.
+            {"\n"}
+            (9:16 비율의 세로 사진을 권장합니다.)
+          </Text>
         </View>
       )}
 
@@ -699,17 +703,26 @@ function StaticShotCanvas({
             <Item
               label="총 거리"
               value={`${run.distance.toFixed(2)} km`}
+              align="left"
             />
-            <Item label="총 시간" value={formatDuration(run.duration)} />
+            <Item
+              label="총 러닝 시간"
+              value={formatDuration(run.duration)}
+              align="right"
+            />
           </View>
 
           <View style={canvas.row}>
             <Item
               label="평균 페이스"
               value={`${formatPace(run.pace)}/km`}
+              align="left"
             />
             <Item
-              label="평균 케이던스" value={`${Math.round(run.cadence)} spm`} />
+              label="평균 케이던스"
+              value={`${Math.round(run.cadence)} spm`}
+              align="right"
+            />
           </View>
 
           <View style={canvas.rowLast}>
@@ -725,8 +738,13 @@ function StaticShotCanvas({
                   m
                 </Text>
               }
+              align="left"
             />
-            <Item label="칼로리" value={`${Math.round(run.calories)} kcal`} />
+            <Item
+              label="칼로리"
+              value={`${Math.round(run.calories)} kcal`}
+              align="right"
+            />
           </View>
         </View>
 
@@ -745,16 +763,31 @@ function Item({
   label,
   value,
   style,
+  align = "left",
 }: {
   label: string;
   value: React.ReactNode;
   style?: any;
+  align?: "left" | "right";
 }) {
+  const isRight = align === "right";
+
   return (
-    <View style={[canvas.item, style]}>
-      <Text style={canvas.label}>{label}</Text>
+    <View
+      style={[
+        canvas.item,
+        isRight ? canvas.itemRight : canvas.itemLeft,
+        style,
+      ]}
+    >
+      <Text style={[canvas.label, isRight && canvas.labelRight]}>
+        {label}
+      </Text>
+
       {typeof value === "string" ? (
-        <Text style={canvas.value}>{value}</Text>
+        <Text style={[canvas.value, isRight && canvas.valueRight]}>
+          {value}
+        </Text>
       ) : (
         value
       )}
@@ -852,6 +885,7 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
     marginTop: 10,
+
   },
 
   pickButton: {
@@ -964,8 +998,9 @@ const canvas = StyleSheet.create({
 
   emptyBackgroundText: {
     color: "#AAB3C5",
-    fontSize: 44,
-    fontWeight: "600",
+    fontSize: 48,
+    fontWeight: "700",
+    textAlign: "center",
   },
 
   overlay: {
@@ -979,19 +1014,19 @@ const canvas = StyleSheet.create({
   },
 
   contentWrapTop: {
-    top: 92,
+    top: 56,
   },
 
   contentWrapBottom: {
-    bottom: 92,
+    bottom: 56,
   },
 
   dateText: {
     color: "#DCE6FF",
-    fontSize: 42,
+    fontSize: 34,
     fontWeight: "700",
     textAlign: "center",
-    marginBottom: 20,
+    marginBottom: 8,
 
     textShadowColor: "rgba(0,0,0,0.85)",
     textShadowOffset: { width: 0, height: 1 },
@@ -1000,11 +1035,11 @@ const canvas = StyleSheet.create({
 
   coachHeadline: {
     color: "#FFFFFF",
-    fontSize: 48,
+    fontSize: 40,
     fontWeight: "800",
     textAlign: "center",
-    lineHeight: 60,
-    marginBottom: 28,
+    lineHeight: 46,
+    marginBottom: 14,
 
     textShadowColor: "rgba(0,0,0,0.7)",
     textShadowOffset: { width: 0, height: 1 },
@@ -1012,12 +1047,12 @@ const canvas = StyleSheet.create({
   },
 
   card: {
-    width: "92%",
+    width: "75%",
     alignSelf: "center",
-    backgroundColor: "rgba(10, 14, 26, 0.36)",
-    borderRadius: 34,
-    paddingHorizontal: 40,
-    paddingVertical: 42,
+    backgroundColor: "rgba(10, 14, 26, 0.40)",
+    borderRadius: 30,
+    paddingHorizontal: 70,
+    paddingVertical: 18,
     borderWidth: 2,
     borderColor: "rgba(255,255,255,0.14)",
   },
@@ -1025,40 +1060,52 @@ const canvas = StyleSheet.create({
   row: {
     flexDirection: "row",
     justifyContent: "space-between",
-    marginBottom: 44,
-    paddingLeft: 68,
-    paddingRight: 4,
+    marginBottom: 16,
+    paddingLeft: 0,
+    paddingRight: 0,
   },
 
   rowLast: {
     flexDirection: "row",
     justifyContent: "space-between",
-    paddingLeft: 68,
-    paddingRight: 4,
+    paddingLeft: 0,
+    paddingRight: 0,
   },
 
   item: {
     width: "48%",
-    minHeight: 130,
+    minHeight: 72,
     justifyContent: "center",
+  },
+
+  itemLeft: {
+    alignItems: "flex-start",
+  },
+
+  itemRight: {
+    alignItems: "flex-end",
   },
 
   label: {
     color: "#C6D2EE",
-    fontSize: 36,
+    fontSize: 27,
     fontWeight: "600",
-    marginBottom: 14,
+    marginBottom: 4,
 
     textShadowColor: "rgba(0,0,0,0.85)",
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 4,
   },
 
+  labelRight: {
+    textAlign: "right",
+  },
+
   value: {
     color: "#FFFFFF",
-    fontSize: 60,
+    fontSize: 46,
     fontWeight: "800",
-    lineHeight: 68,
+    lineHeight: 50,
     textAlignVertical: "center",
 
     textShadowColor: "rgba(0,0,0,0.7)",
@@ -1066,32 +1113,36 @@ const canvas = StyleSheet.create({
     textShadowRadius: 4,
   },
 
+  valueRight: {
+    textAlign: "right",
+  },
+
   valueElevation: {
     color: "#FFFFFF",
-    fontSize: 46,
+    fontSize: 36,
     fontWeight: "800",
-    lineHeight: 68,
+    lineHeight: 50,
     textAlignVertical: "center",
-    transform: [{ translateY: -2 }],
+    transform: [{ translateY: -1 }],
   },
 
   elevationArrow: {
     color: "#FFFFFF",
-    fontSize: 40,
+    fontSize: 30,
     fontWeight: "800",
-    transform: [{ translateY: -2 }],
+    transform: [{ translateY: -1 }],
   },
 
   logoWrap: {
     alignSelf: "center",
-    marginTop: 28,
+    marginTop: 6,
   },
 
   logo: {
-    width: 320,
-    height: 56,
+    width: 248,
+    height: 40,
     resizeMode: "contain",
-    opacity: 0.9,
+    opacity: 0.88,
 
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 0 },

@@ -7,20 +7,14 @@ import {
   View,
 } from "react-native";
 import { router, useFocusEffect } from "expo-router";
-import {
-  SafeAreaView,
-  useSafeAreaInsets,
-} from "react-native-safe-area-context";
+import { SafeAreaView } from "react-native-safe-area-context";
 import {
   formatRunDateTimeRange,
   loadRunHistory,
   RunData,
 } from "../utils/storage";
-import { BannerAd, BannerAdSize } from "react-native-google-mobile-ads";
-import { bannerUnitId } from "../utils/adManager";
 
 export default function HistoryScreen() {
-  const insets = useSafeAreaInsets();
   const [history, setHistory] = useState<RunData[]>([]);
 
   useFocusEffect(
@@ -34,11 +28,14 @@ export default function HistoryScreen() {
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{
+          flexGrow: 1,
           paddingTop: 6,
-          paddingBottom: insets.bottom + 30,
+          paddingBottom: 24,
           paddingHorizontal: 20,
         }}
       >
+
+      <View style={styles.contentBody}>
         <View style={styles.headerRow}>
           <Pressable onPress={() => router.back()}>
             <Text style={styles.backText}>← 뒤로</Text>
@@ -78,7 +75,7 @@ export default function HistoryScreen() {
             >
 
               <Text style={styles.dateText}>
-                {formatRunDateTimeRange(item.startedAt, item.duration)}
+                {formatRunDateTimeRange(item.startedAt, item.endedAt)}
               </Text>
 
               <View style={styles.metricRow}>
@@ -90,7 +87,7 @@ export default function HistoryScreen() {
                 </View>
 
                 <View style={styles.metricBox}>
-                  <Text style={styles.metricLabel}>총 시간</Text>
+                  <Text style={styles.metricLabel}>총 러닝 시간</Text>
                   <Text style={styles.metricValue}>
                     {formatDuration(item.duration)}
                   </Text>
@@ -136,7 +133,6 @@ export default function HistoryScreen() {
                   </Text>
                 </View>
               </View>
-
               <View style={styles.bottomRow}>
                 <View />
                 <Text style={styles.detailText}>리포트 보기</Text>
@@ -144,14 +140,8 @@ export default function HistoryScreen() {
             </Pressable>
           ))
         )}
-      </ScrollView>
-
-        <View style={[styles.bannerFixed, { paddingBottom: insets.bottom }]}>
-          <BannerAd
-            unitId={bannerUnitId}
-            size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
-          />
         </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -335,11 +325,7 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
 
-  bannerFixed: {
-    position: "absolute",
-    bottom: 0,
-    width: "100%",
-    alignItems: "center",
-    backgroundColor: "transparent",
+  contentBody: {
+    flexGrow: 1,
   },
 });

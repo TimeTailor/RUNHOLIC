@@ -34,11 +34,13 @@ export default function SplashScreen() {
       <SafeAreaView style={styles.safe}>
         <View style={styles.container}>
           <View style={[styles.topArea, { paddingTop: insets.top + 15 }]}>
-            <Image
-              source={require("../assets/images/logo_splash.png")}
-              style={styles.logo}
-            />
-            <Text style={styles.subtitle}>당신의 페이스를 완성하다</Text>
+            <View style={styles.brandBlock}>
+              <Image
+                source={require("../assets/images/logo_splash.png")}
+                style={styles.logo}
+              />
+              <Text style={styles.subtitle}>당신의 페이스를 완성하다</Text>
+            </View>
           </View>
 
           <View style={styles.middleArea} />
@@ -67,13 +69,16 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#000000",
   },
+
   overlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: "rgba(0,0,0,0.16)",
   },
+
   topGradient: {
     ...StyleSheet.absoluteFillObject,
   },
+
   safe: {
     flex: 1,
   },
@@ -81,9 +86,17 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingHorizontal: 28,
   },
+
   topArea: {
     alignItems: "flex-start",
   },
+
+  brandBlock: {
+    width: 220,
+    alignItems: "center",
+    transform: [{ translateX: -10 }],
+  },
+
   logo: {
     width: 220,
     height: 50,
@@ -93,11 +106,10 @@ const styles = StyleSheet.create({
     shadowRadius: 2,
     tintColor: undefined,
     marginBottom: 0,
-    
   },
+
   subtitle: {
-    marginTop: 10,
-    marginLeft: 8,
+    marginTop: 5,
     color: "rgba(255,255,255,0.88)",
     fontSize: 16,
     fontWeight: "500",
@@ -105,12 +117,15 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 8,
   },
+
   middleArea: {
     flex: 1,
   },
+
   bottomArea: {
     justifyContent: "flex-end",
   },
+
   primaryButton: {
     height: 58,
     borderRadius: 29,
@@ -123,6 +138,7 @@ const styles = StyleSheet.create({
     shadowRadius: 10,
     elevation: 4,
   },
+
   primaryButtonText: {
     color: "#FFFFFF",
     fontSize: 17,

@@ -49,6 +49,7 @@ export type RunData = {
   id: string;
   dateTimeText: string;
   startedAt: string;
+  endedAt: string;
   distance: number;
   pace: number;
   duration: number;
@@ -148,9 +149,9 @@ export function updateRunnerType(history: RunnerType[]): RunnerType {
   );
 }
 
-export function formatRunDateTimeRange(startedAt: string, durationSec: number) {
+export function formatRunDateTimeRange(startedAt: string, endedAt: string) {
   const start = new Date(startedAt);
-  const end = new Date(start.getTime() + durationSec * 1000);
+  const end = new Date(endedAt);
 
   const startDateText = formatDateWithDots(start);
   const endDateText = formatDateWithDots(end);

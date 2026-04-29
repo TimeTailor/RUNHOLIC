@@ -7,6 +7,7 @@ import {
   Text,
   TextInput,
   View,
+  Linking,
 } from "react-native";
 import { router } from "expo-router";
 import {
@@ -93,7 +94,7 @@ export default function ProfileSetupScreen() {
           styles.content,
           {
             paddingTop: 6,
-            paddingBottom: insets.bottom + 20,
+            paddingBottom: 24,
           },
         ]}
       >
@@ -221,6 +222,24 @@ export default function ProfileSetupScreen() {
         <Pressable style={styles.saveButton} onPress={handleSave}>
           <Text style={styles.saveButtonText}>저장</Text>
         </Pressable>
+
+        <Pressable
+          onPress={() =>
+            Linking.openURL("https://timetailor.github.io/RUNHOLIC/privacy-policy.html")
+          }
+          style={{ marginTop: 16, alignItems: "center" }}
+        >
+          <Text
+            style={{
+              fontSize: 12,
+              color: "#888",
+              textDecorationLine: "underline",
+            }}
+          >
+            개인정보 처리방침
+          </Text>
+        </Pressable>
+
       </ScrollView>
     </SafeAreaView>
   );

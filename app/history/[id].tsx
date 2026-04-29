@@ -10,22 +10,16 @@ import {
 } from "react-native";
 import MapView, { Polyline } from "react-native-maps";
 import { router, useLocalSearchParams } from "expo-router";
-import {
-  SafeAreaView,
-  useSafeAreaInsets,
-} from "react-native-safe-area-context";
+import { SafeAreaView } from "react-native-safe-area-context";
 import {
   deleteRunById,
   formatRunDateTimeRange,
   loadRunById,
   RunData,
 } from "../../utils/storage";
-import { BannerAd, BannerAdSize } from "react-native-google-mobile-ads";
-import { bannerUnitId } from "../../utils/adManager";
 
 export default function RunDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const insets = useSafeAreaInsets();
   const [run, setRun] = useState<RunData | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -72,13 +66,7 @@ export default function RunDetailScreen() {
         longitudeDelta: lngDelta,
       };
     }
-
-    return {
-      latitude: 37.5665,
-      longitude: 126.978,
-      latitudeDelta: 0.02,
-      longitudeDelta: 0.02,
-    };
+    return null;
   }, [run]);
 
   const handleDelete = () => {
@@ -121,11 +109,11 @@ export default function RunDetailScreen() {
   }
 
   const routeSegments =
-    run.routeSegments ?? (run.route.length ? [run.route] : []);
+    run.routeSegments ?? (run.route?.length ? [run.route] : []);
   const flatRoute = routeSegments.flat();
   const hasRoute = flatRoute.length >= 1;
 
-  const dateTimeRangeText = formatRunDateTimeRange(run.startedAt, run.duration);
+  const dateTimeRangeText = formatRunDateTimeRange(run.startedAt, run.endedAt);
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -133,7 +121,7 @@ export default function RunDetailScreen() {
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{
           paddingTop: 6,
-          paddingBottom: insets.bottom + 30,
+          paddingBottom: 24,
           paddingHorizontal: 20,
         }}
       >
@@ -196,7 +184,7 @@ export default function RunDetailScreen() {
             </View>
 
             <View style={styles.infoCard}>
-              <Text style={styles.infoLabel}>총 시간</Text>
+              <Text style={styles.infoLabel}>총 러닝 시간</Text>
               <Text style={styles.infoValue}>
                 {formatDuration(run.duration)}
               </Text>
@@ -269,15 +257,15 @@ export default function RunDetailScreen() {
 
               {run.splits.map((split, index) => {
                 const prevSplit = index > 0 ? run.splits[index - 1] : null;
-                const paceDeltaSec =
-                  prevSplit ? split.avgPaceSec - prevSplit.avgPaceSec : null;
+                const paceDeltaSec = prevSplit
+                  ? Math.floor(split.avgPaceSec) - Math.floor(prevSplit.avgPaceSec)
+                  : null;
 
                 const elevationGainM = split.elevationGainM ?? 0;
                 const elevationLossM = split.elevationLossM ?? 0;
 
                 const gain = Math.max(0, Math.round(elevationGainM));
                 const loss = Math.max(0, Math.round(elevationLossM));
-                const isFlat = gain === 0 && loss === 0;
 
                 return (
                   <View
@@ -318,7 +306,9 @@ export default function RunDetailScreen() {
                         styles.splitElev,
                       ]}
                     >
-                      {isFlat ? "—" : <>▲{gain}m{" "}▼{loss}m</>}
+                      <>
+                        ▲{gain}m{"\n"}▼{loss}m
+                      </>
                     </Text>
                   </View>
                 );
@@ -332,7 +322,7 @@ export default function RunDetailScreen() {
         </View>
 
         <Pressable
-          style={styles.primaryButton}
+          style={styles.primaryButtonLast}
           onPress={() =>
             router.push({
               pathname: "/view-shot/[id]",
@@ -343,13 +333,6 @@ export default function RunDetailScreen() {
           <Text style={styles.primaryButtonText}>인증 이미지 만들기</Text>
         </Pressable>
       </ScrollView>
-
-        <View style={[styles.bannerFixed, { paddingBottom: insets.bottom }]}>
-          <BannerAd
-            unitId={bannerUnitId}
-            size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
-          />
-        </View>
     </SafeAreaView>
   );
 }
@@ -637,7 +620,7 @@ const styles = StyleSheet.create({
 
   splitDeltaFaster: {
     fontSize: 14,
-    color: "#4DA6FF",
+    color: "#22C55E",
     fontWeight: "800",
   },
 
@@ -649,7 +632,7 @@ const styles = StyleSheet.create({
 
   splitDeltaNeutral: {
     fontSize: 14,
-    color: "#AAB3C5",
+    color: "#DCE6FF",
     fontWeight: "800",
   },
 
@@ -671,17 +654,17 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
 
+  primaryButtonLast: {
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: "#FFFFFF",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
   primaryButtonText: {
     color: "#111111",
     fontSize: 16,
     fontWeight: "800",
-  },
-
-  bannerFixed: {
-    position: "absolute",
-    bottom: 0,
-    width: "100%",
-    alignItems: "center",
-    backgroundColor: "transparent",
   },
 });

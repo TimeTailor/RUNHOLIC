@@ -57,6 +57,7 @@ data class RunSessionState(
     val isRunning: Boolean = false,
     val isPaused: Boolean = false,
     val startedAt: Long = 0L,
+    val endedAt: Long = 0L,
     val resumedAt: Long,
 
     val elapsedMs: Long = 0L,
@@ -97,6 +98,7 @@ data class RunSessionState(
             "isRunning" to isRunning,
             "isPaused" to isPaused,
             "startedAt" to startedAt,
+            "endedAt" to endedAt,
             "resumedAt" to resumedAt,
 
             "elapsedMs" to elapsedMs,

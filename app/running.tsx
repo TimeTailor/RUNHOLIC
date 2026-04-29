@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   AppState,
@@ -13,6 +13,7 @@ import {
   Text,
   TextInput,
   View,
+  InteractionManager,
 } from "react-native";
 import { EventEmitter, requireNativeModule } from "expo-modules-core";
 import MapView, { Marker, Polyline } from "react-native-maps";
@@ -20,11 +21,8 @@ import * as Notifications from "expo-notifications";
 import * as Location from "expo-location";
 import * as Battery from "expo-battery";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { router, useFocusEffect, useNavigation } from "expo-router";
-import {
-  SafeAreaView,
-  useSafeAreaInsets,
-} from "react-native-safe-area-context";
+import { router, useNavigation } from "expo-router";
+import { SafeAreaView } from "react-native-safe-area-context";
 import * as IntentLauncher from "expo-intent-launcher";
 import { Ionicons } from "@expo/vector-icons";
 import type {
@@ -78,6 +76,7 @@ type NativeSessionPayload = {
   isRunning: boolean;
   isPaused: boolean;
   startedAt: number;
+  endedAt: number;
   resumedAt?: number;
 
   elapsedMs: number;
@@ -125,18 +124,9 @@ const DEFAULT_VOICE_SETTINGS: RunVoiceSettings = {
   coachVoiceEnabled: true,
 };
 
-const IDLE_MAP_DELTA = 0.01;      // 시작 전: 반경 1km 정도
-const EARLY_RUN_MAP_DELTA = 0.003; // 시작 직후: 반경 300m 정도
-
-const MIN_FIT_ROUTE_LAT_SPAN = 0.0015;
-const MIN_FIT_ROUTE_LNG_SPAN = 0.0015;
-
-const RUN_MAP_EDGE_PADDING = {
-  top: 80,
-  right: 80,
-  bottom: 80,
-  left: 80,
-};
+const IDLE_MAP_DELTA = 0.01;      
+const EARLY_RUN_MAP_DELTA = 0.0015;
+const FOLLOW_MAP_DELTA = 0.0035; 
 
 function getNativeEmitter() {
   if (!RunholicForeground) return null;
@@ -227,6 +217,7 @@ function normalizeNativeSession(raw: any): NativeSessionPayload | null {
     isRunning: !!raw.isRunning,
     isPaused: !!raw.isPaused,
     startedAt: Number(raw.startedAt ?? 0),
+    endedAt: Number(raw.endedAt ?? 0),
     resumedAt: Number(raw.resumedAt ?? 0),
 
     elapsedMs: Number(raw.elapsedMs ?? 0),
@@ -368,6 +359,9 @@ function buildRunDataFromNative(session: NativeSessionPayload): RunData {
   const startedAtMs = session.startedAt || Date.now();
   const startedAtIso = new Date(startedAtMs).toISOString();
 
+  const endedAtMs = session.endedAt;
+  const endedAtIso = new Date(endedAtMs).toISOString();
+
   const flatRoute = flattenRoute(session.routeSegments);
   const fallbackLastPoint = session.lastPoint ? [session.lastPoint] : [];
 
@@ -386,6 +380,7 @@ function buildRunDataFromNative(session: NativeSessionPayload): RunData {
   return {
     id: session.sessionId ?? String(startedAtMs),
     startedAt: startedAtIso,
+    endedAt: endedAtIso,
     dateTimeText: formatDateTimeText(new Date(startedAtMs)),
     distance: session.distanceMeters / 1000,
     pace: session.avgPaceSec,
@@ -403,19 +398,359 @@ function buildRunDataFromNative(session: NativeSessionPayload): RunData {
   };
 }
 
+type FinalPaceStyle = "지속형" | "변속형";
+type FinalFormStyle = "중립" | "케이던스형" | "스트라이드형";
+type FinalSplitTrend = "상승" | "유지" | "하락";
+
+function pickRandom<T>(items: T[]): T {
+  return items[Math.floor(Math.random() * items.length)];
+}
+
+function formatDurationForSpeech(sec: number) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+
+  const parts = [];
+  if (h > 0) parts.push(`${h}시간`);
+  if (m > 0) parts.push(`${m}분`);
+  if (s > 0 || (h === 0 && m === 0)) parts.push(`${s}초`); // 0초만 있는 경우 대비
+
+  return parts.join(' ');
+}
+
+function deriveFinalReportAxis(
+  runnerType: RunnerType
+): { paceStyle: FinalPaceStyle; formStyle: FinalFormStyle } {
+  if (runnerType === "변속형") {
+    return { paceStyle: "변속형", formStyle: "중립" };
+  }
+
+  if (runnerType === "케이던스형") {
+    return { paceStyle: "지속형", formStyle: "케이던스형" };
+  }
+
+  if (runnerType === "스트라이드형") {
+    return { paceStyle: "지속형", formStyle: "스트라이드형" };
+  }
+
+  return { paceStyle: "지속형", formStyle: "중립" };
+}
+
+function getEndSplitComment(splits: RunSplit[]) {
+  if (splits.length < 2) {
+    return pickRandom([
+      "러닝 구간이 짧아 전체 흐름 변화는 크지 않았습니다.",
+      "짧은 거리에서 비교적 일정한 리듬이 유지되었습니다.",
+      "구간 분할이 적어 흐름 변화는 크게 나타나지 않았습니다.",
+    ]);
+  }
+
+  const target = splits.slice(-2);
+  const diff = target[1].avgPaceSec - target[0].avgPaceSec;
+
+  if (diff >= 35) {
+    return pickRandom([
+      "후반 구간에서 페이스 하락 폭이 비교적 크게 나타났습니다.",
+      "끝 구간에서는 속도 유지가 눈에 띄게 어려워졌습니다.",
+      "마무리로 갈수록 리듬이 무거워지는 흐름이 뚜렷했습니다.",
+    ]);
+  }
+
+  if (diff >= 20) {
+    return pickRandom([
+      "후반 구간에서 페이스 하락 경향이 나타났습니다.",
+      "마무리 구간으로 갈수록 속도 유지가 다소 어려워졌습니다.",
+      "끝 구간에서는 리듬이 조금 무거워지는 흐름이 보였습니다.",
+    ]);
+  }
+
+  if (diff <= -35) {
+    return pickRandom([
+      "후반 구간에서 페이스를 크게 끌어올렸습니다.",
+      "마무리 구간에서 흐름을 강하게 살려낸 점이 돋보였습니다.",
+      "끝 구간에서 속도 회복이 뚜렷하게 나타났습니다.",
+    ]);
+  }
+
+  if (diff <= -20) {
+    return pickRandom([
+      "후반 구간에서 페이스를 잘 끌어올렸습니다.",
+      "마무리 구간으로 갈수록 흐름이 더 좋아졌습니다.",
+      "끝 구간에서 리듬을 다시 살려낸 점이 좋았습니다.",
+    ]);
+  }
+
+  return pickRandom([
+    "후반 구간에서도 흐름이 크게 흔들리지 않았습니다.",
+    "마무리 구간까지 비교적 정돈된 리듬이 이어졌습니다.",
+    "끝 구간에서도 페이스 흐름이 자연스럽게 유지되었습니다.",
+  ]);
+}
+
+function deriveSplitTrend(splits: RunSplit[]): FinalSplitTrend {
+  if (splits.length < 2) return "유지";
+
+  const target = splits.slice(-2);
+  const diff = target[1].avgPaceSec - target[0].avgPaceSec;
+
+  if (diff >= 20) return "하락";
+  if (diff <= -20) return "상승";
+  return "유지";
+}
+
+function getCourseProfileComment(
+  elevationGain: number,
+  elevationLoss: number
+) {
+  const gain = Math.round(elevationGain);
+  const loss = Math.round(elevationLoss);
+  const diff = Math.abs(gain - loss);
+
+  if (gain < 5 && loss < 5) {
+    return pickRandom([
+      "고도 변화가 크지 않은 코스였습니다.",
+      "전반적으로 평지에 가까운 코스였습니다.",
+      "오르내림이 크지 않은 비교적 편안한 코스였습니다.",
+    ]);
+  }
+
+  if (diff < 5) {
+    return pickRandom([
+      "상승과 하강이 반복되는 롤링 코스 성격이 있었습니다.",
+      "오르내림이 반복되는 흐름의 코스였습니다.",
+      "상승과 하강이 비교적 고르게 나타난 코스였습니다.",
+    ]);
+  }
+
+  if (gain > loss) {
+    return pickRandom([
+      "오르막 비중이 조금 더 있는 코스였습니다.",
+      "상승 구간 부담이 상대적으로 더 큰 코스였습니다.",
+      "하강보다 상승 쪽이 조금 더 강조된 코스였습니다.",
+    ]);
+  }
+
+  return pickRandom([
+    "내리막 비중이 조금 더 있는 코스였습니다.",
+    "하강 구간 흐름이 상대적으로 더 드러난 코스였습니다.",
+    "상승보다 하강 쪽이 조금 더 많은 코스였습니다.",
+  ]);
+}
+
+function getFinalReportClosing({
+  runnerType,
+  paceStyle,
+  formStyle,
+  splitTrend,
+  splits,
+}: {
+  runnerType: RunnerType;
+  paceStyle: FinalPaceStyle;
+  formStyle: FinalFormStyle;
+  splitTrend: FinalSplitTrend;
+  splits: RunSplit[];
+}) {
+  const endTrend = getEndSplitComment(splits);
+
+  if (paceStyle === "변속형") {
+    if (splitTrend === "상승") {
+      return `${endTrend} ${pickRandom([
+        "가속과 회복이 반복되는 패턴 속에서도 후반 흐름을 잘 살려낸 점이 좋았습니다.",
+        "변속 흐름 속에서도 마지막으로 갈수록 리듬을 더 잘 끌어올린 점이 인상적이었습니다.",
+        "구간 전환이 있는 러닝이었지만, 후반에는 흐름을 더 잘 정리해냈습니다.",
+      ])}`;
+    }
+    if (splitTrend === "유지") {
+      return `${endTrend} ${pickRandom([
+        "구간 전환과 회복 흐름이 비교적 자연스러웠고, 전체 변속 패턴도 무난한 편이었습니다.",
+        "가속과 회복의 연결이 비교적 부드러웠고, 전체적인 변속 흐름도 잘 유지되었습니다.",
+        "전환 리듬이 크게 무너지지 않았고, 전체 운영도 비교적 안정적인 편이었습니다.",
+      ])}`;
+    }
+    return `${endTrend} ${pickRandom([
+      "회복 흐름이 길어지는 경향이 보여, 다음 러닝에서는 전환 이후 리듬 복귀를 조금 더 빠르게 가져가 보세요.",
+      "회복 구간이 다소 길어지는 흐름이 있어, 다음에는 다시 힘을 싣는 타이밍을 조금 더 빠르게 잡아 보세요.",
+      "리듬이 느슨해지는 구간이 보여, 다음 러닝에서는 전환 뒤 흐름 복귀를 조금 더 빠르게 시도해 보세요.",
+    ])}`;
+  }
+
+  if (formStyle === "케이던스형") {
+    if (splitTrend === "상승") {
+      return `${endTrend} ${pickRandom([
+        "케이던스 중심 리듬을 유지하면서 후반 흐름을 더 끌어올린 점이 좋았습니다.",
+        "템포 유지력에 더해 후반 리듬 회복까지 잘 이루어진 러닝이었습니다.",
+        "발 리듬 중심의 흐름을 살리면서 마지막까지 좋은 전개를 만들었습니다.",
+      ])}`;
+    }
+    if (splitTrend === "유지") {
+      return `${endTrend} ${pickRandom([
+        "케이던스와 리듬 유지가 비교적 잘 이어진 러닝이었습니다.",
+        "템포 중심 흐름이 비교적 안정적으로 유지된 점이 좋았습니다.",
+        "발 리듬을 중심으로 한 주행 흐름이 비교적 잘 살아 있었습니다.",
+      ])}`;
+    }
+    return `${endTrend} ${pickRandom([
+      "템포가 조금 줄어드는 흐름이 보여, 다음에는 케이던스 유지에 조금 더 집중해 보세요.",
+      "발 회전이 다소 느슨해지는 구간이 보여, 다음에는 템포 유지에 조금 더 신경 써 보세요.",
+      "리듬 저하가 약간 나타나, 다음 러닝에서는 템포를 끝까지 유지하는 데 집중해 보세요.",
+    ])}`;
+  }
+
+  if (formStyle === "스트라이드형") {
+    if (splitTrend === "상승") {
+      return `${endTrend} ${pickRandom([
+        "보폭과 추진 흐름을 잘 살리면서 후반 구간까지 흐름을 끌어올렸습니다.",
+        "전진 추진이 후반까지 잘 이어지며 마무리 흐름도 좋았습니다.",
+        "보폭 중심 주행이 후반 구간에서 더 잘 살아난 점이 인상적이었습니다.",
+      ])}`;
+    }
+    if (splitTrend === "유지") {
+      return `${endTrend} ${pickRandom([
+        "보폭과 추진 흐름의 균형이 비교적 잘 유지된 러닝이었습니다.",
+        "전진 추진과 리듬의 균형이 비교적 안정적으로 이어졌습니다.",
+        "보폭 중심 흐름이 무리 없이 유지된 점이 좋았습니다.",
+      ])}`;
+    }
+    return `${endTrend} ${pickRandom([
+      "보폭이 줄어드는 경향이 보여, 다음에는 추진 흐름 유지에 조금 더 집중해 보세요.",
+      "후반으로 갈수록 전진 추진이 약해지는 흐름이 보여, 다음에는 보폭 유지에 조금 더 신경 써 보세요.",
+      "추진감이 다소 줄어드는 구간이 보여, 다음에는 보폭과 흐름 유지에 더 집중해 보세요.",
+    ])}`;
+  }
+
+  if (runnerType === "지속형") {
+    if (splitTrend === "상승") {
+      return `${endTrend} ${pickRandom([
+        "전체적으로 안정적인 흐름을 유지하면서 후반 구간까지 더 잘 끌어올렸습니다.",
+        "기본 리듬을 지키면서 마지막 흐름까지 잘 살려낸 점이 좋았습니다.",
+        "지속형 주행 특성을 유지하면서 후반에도 힘을 잘 남겨두었습니다.",
+      ])}`;
+    }
+    if (splitTrend === "유지") {
+      return `${endTrend} ${pickRandom([
+        "전체적으로 페이스 배분이 안정적이었고, 지속적인 흐름 유지도 잘 드러난 러닝이었습니다.",
+        "무리 없는 속도 배분과 리듬 유지가 비교적 잘 이어진 러닝이었습니다.",
+        "큰 무너짐 없이 균형 잡힌 흐름을 유지한 점이 인상적이었습니다.",
+      ])}`;
+    }
+    return `${endTrend} ${pickRandom([
+      "유지력이 조금 떨어지는 흐름이 보여, 다음에는 리듬 유지에 조금 더 집중해 보세요.",
+      "후반으로 갈수록 흐름 유지가 다소 어려워져, 다음에는 일정한 리듬 유지에 더 신경 써 보세요.",
+      "속도 유지가 조금 무거워지는 흐름이 보여, 다음에는 페이스 보존에 조금 더 집중해 보세요.",
+    ])}`;
+  }
+
+  return `${endTrend} ${pickRandom([
+    "전체 흐름은 무난한 편이었습니다.",
+    "전반적인 러닝 흐름은 비교적 안정적인 편이었습니다.",
+    "전체적인 패턴은 크게 무너지지 않고 이어졌습니다.",
+    "큰 기복 없이 비교적 고른 흐름이 이어졌습니다.",
+    "전체 흐름이 과하지도 부족하지도 않게 균형 있게 유지되었습니다.",
+  ])}`;
+}
+
+function buildFinalAiCoachAnalysis({
+  runnerType,
+  distance,
+  duration,
+  cadence,
+  elevationGain,
+  elevationLoss,
+  splits,
+}: {
+  runnerType: RunnerType;
+  distance: number;
+  duration: number;
+  cadence: number;
+  elevationGain: number;
+  elevationLoss: number;
+  splits: RunSplit[];
+}) {
+  const { paceStyle, formStyle } = deriveFinalReportAxis(runnerType);
+  const splitTrend = deriveSplitTrend(splits);
+
+  const closing = getFinalReportClosing({
+    runnerType,
+    paceStyle,
+    formStyle,
+    splitTrend,
+    splits,
+  });
+
+  const base =
+    `${distance.toFixed(2)}킬로미터를 ${formatDurationForSpeech(
+      duration
+    )} 동안 수행했습니다. ` +
+    `평균 케이던스는 ${Math.round(cadence)}이며, ` +
+    `누적 상승고도는 ${Math.round(elevationGain)}미터, ` +
+    `누적 하강고도는 ${Math.round(elevationLoss)}미터였습니다.`;
+
+  const courseComment = getCourseProfileComment(elevationGain, elevationLoss);
+
+  const analysis =
+    paceStyle === "변속형"
+      ? pickRandom([
+          "이번 러닝에서는 구간별 페이스 변화가 비교적 분명하게 나타났고, 가속과 회복이 반복되는 패턴이 확인되었습니다.",
+          "이번 러닝에서는 속도 변화 폭이 비교적 크게 나타나며, 변속형 주행 흐름이 뚜렷하게 드러났습니다.",
+          "이번 러닝에서는 일정한 리듬 유지보다는 구간 전환 중심의 흐름이 더 선명하게 나타났습니다.",
+        ])
+      : formStyle === "케이던스형"
+      ? pickRandom([
+          "이번 러닝에서는 케이던스와 템포 유지 중심의 흐름이 비교적 잘 드러났습니다.",
+          "이번 러닝에서는 보폭보다는 발 리듬을 활용한 주행 성향이 더 뚜렷하게 나타났습니다.",
+          "이번 러닝에서는 템포 중심의 리듬 운영이 비교적 안정적으로 이어졌습니다.",
+        ])
+      : formStyle === "스트라이드형"
+      ? pickRandom([
+          "이번 러닝에서는 보폭을 활용한 추진 흐름이 비교적 뚜렷하게 나타났습니다.",
+          "이번 러닝에서는 발 회전보다는 보폭과 전진 추진력이 중심이 되는 패턴이 드러났습니다.",
+          "이번 러닝에서는 한 걸음 한 걸음의 추진력이 비교적 잘 살아 있는 흐름이 보였습니다.",
+        ])
+      : pickRandom([
+          "이번 러닝에서는 전체적으로 페이스 흐름이 균형잡힌 편이었습니다.",
+          "이번 러닝에서는 큰 기복 없이 비교적 일정한 리듬이 유지되었습니다.",
+          "이번 러닝에서는 속도 변화 폭이 크지 않았고, 전반적으로 편안한 흐름이 이어졌습니다.",
+        ]);
+
+  return `${base} ${courseComment} ${analysis} ${closing}`;
+}
+
 export default function RunningScreen() {
-  const insets = useSafeAreaInsets();
   const navigation = useNavigation();
   const mapRef = useRef<MapView | null>(null);
   const allowExitRef = useRef(false);
   const gpsTimeoutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const foregroundIntroShownRef = useRef(false);
-  const backgroundIntroShownRef = useRef(false);
-  const batteryPopupShownRef = useRef(false);
   const permissionFlowRunningRef = useRef(false);
   const modalLockRef = useRef(false);
   const lastGpsNoticeSessionIdRef = useRef<string | null>(null);
+  const didEnterFollowZoomRef = useRef(false);
+  const didApplyFinishFitRef = useRef(false);
+  const userMapInteractingRef = useRef(false);
+  const lastUserMapTouchAtRef = useRef(0);
+
+  const restoringRef = useRef(false);
+  const lastRestoreAtRef = useRef(0);
+
+  const userToggledPrepRef = useRef(false);
+
+  const loadVoiceSettingsRef = useRef<(() => Promise<void>) | null>(null);
+  const refreshSessionRef = useRef<
+    (() => Promise<NativeSessionPayload | null>) | null
+  >(null);
+  const bootstrapPermissionFlowRef = useRef<
+    ((silent?: boolean) => Promise<void>) | null
+  >(null);
+  const applySessionRef = useRef<
+    ((next: NativeSessionPayload | null) => void) | null
+  >(null);
+  const refreshBatteryOptimizationStatusRef = useRef<
+    (() => Promise<void>) | null
+  >(null);
+  const runRestoreSafelyRef = useRef<
+    ((force?: boolean) => Promise<void>) | null
+  >(null);
 
   const [session, setSession] = useState<NativeSessionPayload | null>(null);
   const [finishedSnapshot, setFinishedSnapshot] = useState<RunData | null>(null);
@@ -427,7 +762,7 @@ export default function RunningScreen() {
   const [notificationReady, setNotificationReady] = useState(
     Platform.OS !== "android"
   );
-  const [locationStatusText, setLocationStatusText] = useState("권한 확인 중");
+  const [locationStatusText, setLocationStatusText] = useState("GPS 확인 중");
   const [gpsTimeout, setGpsTimeout] = useState(false);
 
   const [targetMode, setTargetMode] = useState<
@@ -447,7 +782,28 @@ export default function RunningScreen() {
 
   const [resumePending, setResumePending] = useState(false);
   const [lastValidPace, setLastValidPace] = useState(0);
+  const [resumeGraceUntil, setResumeGraceUntil] = useState(0);
   const [pendingFinish, setPendingFinish] = useState(false);
+  const [startButtonReady, setStartButtonReady] = useState(false);
+
+  const activeDisplayRouteSegments = useMemo(() => {
+    return buildDisplaySegments(session?.routeSegments ?? []);
+  }, [session?.routeSegments]);
+
+  const activeFlatRoute = useMemo(() => {
+    return activeDisplayRouteSegments.flat();
+  }, [activeDisplayRouteSegments]);
+
+  const finishedDisplayRouteSegments = useMemo(() => {
+    return buildDisplaySegments(
+      finishedSnapshot?.routeSegments ??
+        (finishedSnapshot?.route?.length ? [finishedSnapshot.route] : [])
+    );
+  }, [finishedSnapshot?.routeSegments, finishedSnapshot?.route]);
+
+  const finishedFlatRoute = useMemo(() => {
+    return finishedDisplayRouteSegments.flat();
+  }, [finishedDisplayRouteSegments]);
 
   const wait = (ms: number) =>
     new Promise((resolve) => setTimeout(resolve, ms));
@@ -531,9 +887,17 @@ export default function RunningScreen() {
   };
 
   const applySession = (next: NativeSessionPayload | null) => {
-    setSession(next);
+    if (!next) {
+      setSession(null);
+      return;
+    }
 
-    if (!next) return;
+    if (!next.isRunning && !next.isPaused && !pendingFinish) {
+      setSession(null);
+      return;
+    }
+
+    setSession(next);
 
     if (next.lastPoint) {
       setCurrentLocation(next.lastPoint);
@@ -542,11 +906,7 @@ export default function RunningScreen() {
       }
     }
 
-    if (
-      !next.isPaused &&
-      next.currentPaceSec > 0 &&
-      Number.isFinite(next.currentPaceSec)
-    ) {
+    if (!next.isPaused && isUsableCurrentPace(next.currentPaceSec)) {
       setLastValidPace(next.currentPaceSec);
     }
 
@@ -579,6 +939,11 @@ export default function RunningScreen() {
         return null;
       }
 
+      if (!normalized.isRunning && !normalized.isPaused && !pendingFinish) {
+        setSession(null);
+        return null;
+      }
+
       applySession(normalized);
       return normalized;
     } catch (error) {
@@ -595,156 +960,80 @@ export default function RunningScreen() {
     setPendingFinish(false);
     setGpsTimeout(false);
     setPrepExpanded(true);
+    didEnterFollowZoomRef.current = false;
+    didApplyFinishFitRef.current = false;
+    userMapInteractingRef.current = false;
+    lastUserMapTouchAtRef.current = 0;
+    userToggledPrepRef.current = false;
+    setResumeGraceUntil(0);
 
     await loadCurrentLocation();
   };
 
   useEffect(() => {
-    loadVoiceSettings();
-    refreshSession();
-    bootstrapPermissionFlow();
-    loadInterstitial();
-
-    const emitter = getNativeEmitter();
-    const sub = emitter?.addListener?.("onSessionUpdate", (payload: any) => {
-      const normalized = normalizeNativeSession(payload);
-      if (!normalized) return;
-      applySession(normalized);
-    });
-
-    return () => {
-      if (gpsTimeoutTimerRef.current) {
-        clearTimeout(gpsTimeoutTimerRef.current);
-      }
-
-      sub?.remove?.();
-    };
-  }, []);
-
-  useEffect(() => {
-    const unsubscribe = navigation.addListener("focus", () => {
-      void bootstrapPermissionFlow(true);
-      void refreshBatteryOptimizationStatus();
-
-      (async () => {
-        const active = await refreshSession();
-
-        if (active?.isRunning) {
-          await restoreRunningState();
-        } else {
-          await resetIdleRunningScreen();
-        }
-      })();
-    });
-
-    return unsubscribe;
-  }, [navigation]);
-
-  useFocusEffect(
-    React.useCallback(() => {
-      let mounted = true;
-
-      (async () => {
-        const active = await refreshSession();
-        if (!mounted) return;
-
-        if (!active?.isRunning) {
-          await resetIdleRunningScreen();
-        }
-      })();
-
-      return () => {
-        mounted = false;
-      };
-    }, [])
-  );
-
-  useEffect(() => {
-    const sub = AppState.addEventListener(
-      "change",
-      async (nextState: AppStateStatus) => {
-        if (nextState !== "active") return;
-
-        await refreshBatteryOptimizationStatus();
-        await restoreRunningState();
-      }
-    );
-
-    return () => sub.remove();
-  }, []);
-
-  useEffect(() => {
     if (!mapRef.current || !currentLocation) return;
 
-    const activeRouteSegments = buildDisplaySegments(session?.routeSegments ?? []);
-    const activeFlatRoute = activeRouteSegments.flat();
+    const now = Date.now();
 
-    const finishedRouteSegments = buildDisplaySegments(
-      finishedSnapshot?.routeSegments ??
-        (finishedSnapshot?.route?.length ? [finishedSnapshot.route] : [])
-    );
-    const finishedFlatRoute = finishedRouteSegments.flat();
+    if (userMapInteractingRef.current) {
+      if (now - lastUserMapTouchAtRef.current < 2000) return;
+      userMapInteractingRef.current = false;
+    }
 
-    // 러닝 중이면 현재 세션 기준으로 처리
     if (session?.isRunning && !session.isPaused) {
-      if (activeFlatRoute.length < 2) {
-        mapRef.current.animateToRegion(
-          {
-            latitude: currentLocation.latitude,
-            longitude: currentLocation.longitude,
-            latitudeDelta: EARLY_RUN_MAP_DELTA,
-            longitudeDelta: EARLY_RUN_MAP_DELTA,
-          },
-          250
-        );
-        return;
+      let delta = EARLY_RUN_MAP_DELTA;
+
+      if (activeFlatRoute.length >= 2) {
+        const lats = activeFlatRoute.map((p) => p.latitude);
+        const lngs = activeFlatRoute.map((p) => p.longitude);
+
+        const minLat = Math.min(...lats);
+        const maxLat = Math.max(...lats);
+        const minLng = Math.min(...lngs);
+        const maxLng = Math.max(...lngs);
+
+        const latSpan = maxLat - minLat;
+        const lngSpan = maxLng - minLng;
+
+        if (!didEnterFollowZoomRef.current && (latSpan > 0.0006 || lngSpan > 0.0008)) {
+          didEnterFollowZoomRef.current = true;
+        }
       }
 
-      const lats = activeFlatRoute.map((p) => p.latitude);
-      const lngs = activeFlatRoute.map((p) => p.longitude);
-
-      const minLat = Math.min(...lats);
-      const maxLat = Math.max(...lats);
-      const minLng = Math.min(...lngs);
-      const maxLng = Math.max(...lngs);
-
-      const latSpan = maxLat - minLat;
-      const lngSpan = maxLng - minLng;
-
-      // 초반엔 전체 fit 하지 않고 300m 정도 축척 유지
-      if (
-        latSpan < MIN_FIT_ROUTE_LAT_SPAN &&
-        lngSpan < MIN_FIT_ROUTE_LNG_SPAN
-      ) {
-        mapRef.current.animateToRegion(
-          {
-            latitude: currentLocation.latitude,
-            longitude: currentLocation.longitude,
-            latitudeDelta: EARLY_RUN_MAP_DELTA,
-            longitudeDelta: EARLY_RUN_MAP_DELTA,
-          },
-          250
-        );
-        return;
+      if (didEnterFollowZoomRef.current) {
+        delta = FOLLOW_MAP_DELTA;
       }
 
-      mapRef.current.fitToCoordinates(activeFlatRoute, {
-        edgePadding: RUN_MAP_EDGE_PADDING,
-        animated: true,
-      });
+      mapRef.current.animateToRegion(
+        {
+          latitude: currentLocation.latitude,
+          longitude: currentLocation.longitude,
+          latitudeDelta: delta,
+          longitudeDelta: delta,
+        },
+        250
+      );
       return;
     }
 
-    // 종료 후 결과 스냅샷이 있으면 그것도 전체 경로로 맞춤
+    didEnterFollowZoomRef.current = false;
+
     if (finishedFlatRoute.length >= 2) {
-      mapRef.current.fitToCoordinates(finishedFlatRoute, {
-        edgePadding: RUN_MAP_EDGE_PADDING,
-        animated: true,
-      });
+      if (!didApplyFinishFitRef.current) {
+        didApplyFinishFitRef.current = true;
+        mapRef.current.fitToCoordinates(finishedFlatRoute, {
+          edgePadding: {
+            top: 30,
+            right: 30,
+            bottom: 30,
+            left: 30,
+          },
+          animated: false,
+        });
+      }
       return;
     }
 
-    // 시작 전: 현재 위치 기준 1km 정도 축척
     mapRef.current.animateToRegion(
       {
         latitude: currentLocation.latitude,
@@ -786,6 +1075,20 @@ export default function RunningScreen() {
 
       e.preventDefault();
       confirmExitRunning();
+    });
+
+    return unsubscribe;
+  }, [navigation, session?.isRunning]);
+
+  useEffect(() => {
+    const unsubscribe = navigation.addListener("blur", () => {
+      if (session?.isRunning) return;
+
+      setFinishedSnapshot(null);
+      setLastFinishedRunId(null);
+      setLastValidPace(0);
+      setPendingFinish(false);
+      setGpsTimeout(false);
     });
 
     return unsubscribe;
@@ -844,8 +1147,6 @@ export default function RunningScreen() {
   };
 
   const restoreRunningState = async () => {
-    await refreshSession();
-
     const current = await RunholicForeground?.getCurrentSession?.().catch(
       () => null
     );
@@ -878,37 +1179,56 @@ export default function RunningScreen() {
     }
   };
 
-  const openAppSettings = async () => {
+  const runRestoreSafely = async (force = false) => {
+    const now = Date.now();
+
+    if (restoringRef.current) return;
+    if (!force && now - lastRestoreAtRef.current < 1500) return;
+
+    restoringRef.current = true;
+    lastRestoreAtRef.current = now;
+
     try {
-      await Linking.openSettings();
-    } catch (error) {
-      console.log("Open settings error:", error);
+      const active = await refreshSession();
+      if (active?.isRunning) {
+        if (!userToggledPrepRef.current) {
+          setPrepExpanded(false);
+        }
+        await restoreRunningState();
+      } else {
+        await resetIdleRunningScreen();
+      }
+    } finally {
+      restoringRef.current = false;
     }
   };
 
-  const showPermissionSettingsAlert = async ({
-    title,
-    message,
-  }: {
-    title: string;
-    message: string;
-  }) => {
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const shown = showLockedAlert(title, message, [
-        { text: "취소", style: "cancel" },
-        {
-          text: "설정으로 이동",
-          onPress: () => {
-            openAppSettings();
-          },
-        },
-      ]);
+  useEffect(() => {
+    const unsubscribe = navigation.addListener("focus", () => {
+      void refreshBatteryOptimizationStatusRef.current?.();
+      void runRestoreSafelyRef.current?.(true);
+    });
 
-      if (shown) return;
+    return unsubscribe;
+  }, [navigation]);
 
-      await wait(250);
-    }
-  };
+  useEffect(() => {
+    const sub = AppState.addEventListener(
+      "change",
+      (nextState: AppStateStatus) => {
+        if (nextState !== "active") return;
+
+        userToggledPrepRef.current = false;
+
+        InteractionManager.runAfterInteractions(async () => {
+          await refreshBatteryOptimizationStatusRef.current?.();
+          await runRestoreSafelyRef.current?.(true);
+        });
+      }
+    );
+
+    return () => sub.remove();
+  }, []);
 
   const loadCurrentLocation = async () => {
     setLocationStatusText("GPS 위치 확인 중");
@@ -957,73 +1277,55 @@ export default function RunningScreen() {
     }
   };
 
+  useEffect(() => {
+    if (gpsReady) return;
+    if (session?.isRunning) return;
+    if (!permissionReady) return;
+
+    let running = false;
+
+    const interval = setInterval(async () => {
+      if (running) return;
+
+      running = true;
+      try {
+        await loadCurrentLocation();
+      } finally {
+        running = false;
+      }
+    }, 4000);
+
+    return () => clearInterval(interval);
+  }, [gpsReady, session?.isRunning, permissionReady]);
+
+  useEffect(() => {
+    if (gpsReady && gpsTimeoutTimerRef.current) {
+      clearTimeout(gpsTimeoutTimerRef.current);
+      gpsTimeoutTimerRef.current = null;
+    }
+  }, [gpsReady]);
+
   const requestNotificationPermission = async () => {
-    const settings = await Notifications.getPermissionsAsync();
-    const alreadyGranted =
-      settings.granted ||
-      settings.ios?.status ===
-        Notifications.IosAuthorizationStatus.AUTHORIZED;
-
-    if (alreadyGranted) {
-      setNotificationReady(true);
-      return true;
-    }
-
-    const shouldRequest = await askLockedAlert(
-      "알림 권한 안내",
-      "백그라운드 러닝 추적 상태를 상태표시줄에 표시하려면 알림 권한이 필요합니다.",
-      "권한 허용"
-    );
-
-    if (!shouldRequest) {
-      setNotificationReady(false);
-      return false;
-    }
-
     const requested = await Notifications.requestPermissionsAsync();
+
     const granted =
       requested.granted ||
       requested.ios?.status ===
         Notifications.IosAuthorizationStatus.AUTHORIZED;
 
     setNotificationReady(granted);
-
-    if (!granted) {
-      await showPermissionSettingsAlert({
-        title: "알림 권한 필요",
-        message:
-          "백그라운드 러닝 추적 상태를 표시하려면 알림 권한이 필요합니다. 설정에서 알림 권한을 허용해주세요.",
-      });
-      return false;
-    }
-
-    return true;
+    return granted;
   };
 
   const requestBackgroundPermission = async () => {
-    setLocationStatusText("백그라운드 위치 권한 요청 중");
-
     const bg = await Location.requestBackgroundPermissionsAsync();
     const granted = bg.status === "granted";
 
     setBackgroundReady(granted);
-
-    if (!granted) {
-      await showPermissionSettingsAlert({
-        title: "항상 허용 권장",
-        message:
-          "화면이 꺼져도 러닝 기록을 계속하려면 백그라운드 위치 권한이 필요합니다. 설정에서 '항상 허용'으로 바꿔주세요.",
-      });
-      return false;
-    }
-
-    setLocationStatusText("백그라운드 위치 권한 확인 완료");
-    return true;
+    return granted;
   };
 
   const requestForegroundPermission = async () => {
-    setLocationStatusText("전경 위치 권한 요청 중");
-
     const fg = await Location.requestForegroundPermissionsAsync();
     const granted = fg.status === "granted";
 
@@ -1031,25 +1333,17 @@ export default function RunningScreen() {
 
     if (!granted) {
       setGpsReady(false);
-      setLocationStatusText("전경 위치 권한이 필요합니다");
-
-      await showPermissionSettingsAlert({
-        title: "위치 권한 필요",
-        message:
-          "러닝 거리, 페이스, 지도 기록을 위해 위치 권한이 필요합니다. 설정에서 위치 권한을 허용해주세요.",
-      });
-      return false;
+      setGpsTimeout(false);
     }
 
-    await loadCurrentLocation();
-    return true;
+    return granted;
   };
 
   const promptBatteryOptimizationSetup = () => {
     if (Platform.OS !== "android") return;
 
     showLockedAlert(
-      "백그라운드 실행 권장 설정",
+      "배터리 사용 제한 변경 안내",
       "화면이 꺼져도 러닝 추적과 음성 안내가 안정적으로 유지되도록, RUNHOLIC 앱의 배터리 사용 제한을 '제한 없음'으로 바꿔주세요.",
       [
         { text: "나중에", style: "cancel" },
@@ -1107,128 +1401,106 @@ export default function RunningScreen() {
     }
   };
 
-  const maybePromptBatteryOptimization = async () => {
-    if (Platform.OS !== "android") return;
-
-    try {
-      const cachedDisabled =
-        (await AsyncStorage.getItem(BATTERY_OPT_DISABLED_KEY)) === "1";
-
-      if (cachedDisabled) {
-        setNeedsBatteryOptimization(false);
-        return;
-      }
-
-      const enabled = await Battery.isBatteryOptimizationEnabledAsync();
-
-      if (!enabled) {
-        setNeedsBatteryOptimization(false);
-        await AsyncStorage.setItem(BATTERY_OPT_DISABLED_KEY, "1");
-        return;
-      }
-
-      setNeedsBatteryOptimization(true);
-
-      if (!batteryPopupShownRef.current) {
-        batteryPopupShownRef.current = true;
-        promptBatteryOptimizationSetup();
-      }
-    } catch (error) {
-      console.log("Battery optimization prompt check error:", error);
-      setNeedsBatteryOptimization(true);
-
-      if (!batteryPopupShownRef.current) {
-        batteryPopupShownRef.current = true;
-        promptBatteryOptimizationSetup();
-      }
-    }
-  };
-
   const runPermissionSequence = async () => {
     if (permissionFlowRunningRef.current) return;
     permissionFlowRunningRef.current = true;
 
     try {
-      setLocationStatusText("위치 권한 상태 확인 중");
-
       const fg = await Location.getForegroundPermissionsAsync();
       const bg = await Location.getBackgroundPermissionsAsync();
 
-      const fgGranted = fg.status === "granted";
-      const bgGranted = bg.status === "granted";
+      let fgGranted = fg.status === "granted";
+      let bgGranted = bg.status === "granted";
 
       setPermissionReady(fgGranted);
       setBackgroundReady(bgGranted);
 
-      let finalFgGranted = fgGranted;
-
       if (!fgGranted) {
-        if (!foregroundIntroShownRef.current) {
-          foregroundIntroShownRef.current = true;
+        const shouldRequestFg = await askLockedAlert(
+          "위치 권한 허용 안내",
+          "러닝 거리, 페이스, 지도 기록을 위해 위치 권한의 '앱 사용 중에만 허용'이 필요합니다.",
+          "권한 허용"
+        );
 
-          const shouldRequestFg = await askLockedAlert(
-            "위치 권한 안내",
-            "러닝 기록, 지도 표시, 거리 및 페이스 계산을 위해 위치 권한이 필요합니다.",
-            "권한 허용"
-          );
-
-          if (!shouldRequestFg) {
-            setGpsReady(false);
-            setGpsTimeout(false);
-            setLocationStatusText("전경 위치 권한이 필요합니다");
-            return;
-          }
+        if (!shouldRequestFg) {
+          setGpsReady(false);
+          setGpsTimeout(false);
+          return;
         }
 
-        finalFgGranted = await requestForegroundPermission();
-        if (!finalFgGranted) return;
+        fgGranted = await requestForegroundPermission();
+        if (!fgGranted) return;
 
-        await wait(900);
-      } else {
-        await loadCurrentLocation();
+        await wait(600);
       }
 
-      await requestNotificationPermission();
+      const notificationSettings = await Notifications.getPermissionsAsync();
+      let notificationGranted =
+        notificationSettings.granted ||
+        notificationSettings.ios?.status ===
+          Notifications.IosAuthorizationStatus.AUTHORIZED;
 
-      const bgAfter = await Location.getBackgroundPermissionsAsync();
-      const bgAfterGranted = bgAfter.status === "granted";
-      setBackgroundReady(bgAfterGranted);
+      setNotificationReady(notificationGranted);
 
-      if (!bgAfterGranted) {
-        if (!backgroundIntroShownRef.current) {
-          backgroundIntroShownRef.current = true;
+      if (!notificationGranted) {
+        const shouldRequestNotification = await askLockedAlert(
+          "알림 권한 허용 안내",
+          "백그라운드 러닝 추적 상태를 상태표시줄에 표시하려면 알림 권한 '허용'이 필요합니다.",
+          "권한 허용"
+        );
 
-          const shouldRequestBg = await askLockedAlert(
-            "항상 허용 권장",
-            "화면이 꺼져도 러닝 기록과 음성 안내를 안정적으로 유지하려면 백그라운드 위치 권한을 '항상 허용'하는 것이 좋습니다.",
-            "권한 허용"
-          );
-
-          if (shouldRequestBg) {
-            await requestBackgroundPermission();
-            await wait(900);
-          }
+        if (!shouldRequestNotification) {
+          setNotificationReady(false);
+          return;
         }
+
+        notificationGranted = await requestNotificationPermission();
+        if (!notificationGranted) return;
+
+        await wait(600);
       }
 
-      setTimeout(() => {
-        void maybePromptBatteryOptimization();
-      }, 1000);
+      const bgAfterNotification = await Location.getBackgroundPermissionsAsync();
+      bgGranted = bgAfterNotification.status === "granted";
+      setBackgroundReady(bgGranted);
 
-      await refreshBatteryOptimizationStatus();
-      await loadCurrentLocation();
+      if (!bgGranted) {
+        const shouldRequestBg = await askLockedAlert(
+          "백그라운드 위치 권한 허용 안내",
+          "화면이 꺼져도 러닝 기록과 음성 안내를 유지하려면 백그라운드 위치 권한을 '항상 허용'으로 바꿔주세요.",
+          "권한 허용"
+        );
 
-      const bgFinal = await Location.getBackgroundPermissionsAsync();
-      setBackgroundReady(bgFinal.status === "granted");
+        if (!shouldRequestBg) {
+          setBackgroundReady(false);
+          return;
+        }
+
+        bgGranted = await requestBackgroundPermission();
+        if (!bgGranted) return;
+
+        await wait(600);
+      }
 
       if (Platform.OS === "android") {
-        const settings = await Notifications.getPermissionsAsync();
-        const granted =
-          settings.granted ||
-          settings.ios?.status ===
-            Notifications.IosAuthorizationStatus.AUTHORIZED;
-        setNotificationReady(granted);
+        const batteryOptimizationEnabled =
+          await Battery.isBatteryOptimizationEnabledAsync().catch(() => true);
+
+        if (batteryOptimizationEnabled) {
+          setNeedsBatteryOptimization(true);
+          await AsyncStorage.removeItem(BATTERY_OPT_DISABLED_KEY);
+
+          promptBatteryOptimizationSetup();
+          return;
+        }
+
+        setNeedsBatteryOptimization(false);
+        await AsyncStorage.setItem(BATTERY_OPT_DISABLED_KEY, "1");
+      } else {
+        setNeedsBatteryOptimization(false);
       }
+
+      await loadCurrentLocation();
     } finally {
       permissionFlowRunningRef.current = false;
     }
@@ -1250,7 +1522,6 @@ export default function RunningScreen() {
       } else {
         setGpsReady(false);
         setGpsTimeout(false);
-        setLocationStatusText("전경 위치 권한이 필요합니다");
       }
 
       if (Platform.OS === "android") {
@@ -1268,6 +1539,40 @@ export default function RunningScreen() {
     await runPermissionSequence();
   };
 
+  loadVoiceSettingsRef.current = loadVoiceSettings;
+  refreshSessionRef.current = refreshSession;
+  bootstrapPermissionFlowRef.current = bootstrapPermissionFlow;
+  applySessionRef.current = applySession;
+  refreshBatteryOptimizationStatusRef.current =
+    refreshBatteryOptimizationStatus;
+  runRestoreSafelyRef.current = runRestoreSafely;
+
+  useEffect(() => {
+    const init = async () => {
+      await loadVoiceSettingsRef.current?.();
+      await refreshSessionRef.current?.();
+      await bootstrapPermissionFlowRef.current?.();
+      loadInterstitial();
+    };
+
+    void init();
+
+    const emitter = getNativeEmitter();
+    const sub = emitter?.addListener?.("onSessionUpdate", (payload: any) => {
+      const normalized = normalizeNativeSession(payload);
+      if (!normalized) return;
+      applySessionRef.current?.(normalized);
+    });
+
+    return () => {
+      if (gpsTimeoutTimerRef.current) {
+        clearTimeout(gpsTimeoutTimerRef.current);
+      }
+
+      sub?.remove?.();
+    };
+  }, []);
+
   const resolvedTargetDistanceKm =
     targetMode === "free"
       ? null
@@ -1278,9 +1583,42 @@ export default function RunningScreen() {
         })()
       : Number(targetMode);
 
+  useEffect(() => {
+    if (!session?.isRunning) return;
+    if (!RunholicForeground?.updateTargetDistance) return;
+
+    const nextTargetKm = resolvedTargetDistanceKm ?? -1;
+
+    const currentTargetKm =
+      session.targetDistanceKm && session.targetDistanceKm > 0
+        ? session.targetDistanceKm
+        : -1;
+
+    if (Math.abs(currentTargetKm - nextTargetKm) < 0.0001) return;
+
+    RunholicForeground.updateTargetDistance(nextTargetKm)
+      .then(() => refreshSession())
+      .catch((error: any) => {
+        console.log("updateTargetDistance error:", error);
+      });
+  }, [resolvedTargetDistanceKm, session?.isRunning, session?.targetDistanceKm]);
+
   const targetSummaryText = resolvedTargetDistanceKm
-    ? `${resolvedTargetDistanceKm}km`
+    ? `${resolvedTargetDistanceKm.toFixed(2)}km`
     : "자유 러닝";
+
+  const prepStatusText =
+    !permissionReady
+      ? "위치 권한 확인 중..."
+      : !notificationReady
+      ? "알림 권한 확인 중..."
+      : !backgroundReady
+      ? "백그라운드 권한 확인 중..."
+      : needsBatteryOptimization
+      ? "배터리 최적화 예외 필요"
+      : !gpsReady
+      ? locationStatusText || "GPS 수신 중..."
+      : "위치·알림·백그라운드·배터리·GPS 설정 완료";
 
   const prepSummaryText =
     Platform.OS === "android"
@@ -1293,68 +1631,32 @@ export default function RunningScreen() {
           reportVoiceEnabled ? "ON" : "OFF"
         } · 코칭 ${coachVoiceEnabled ? "ON" : "OFF"}`;
 
+  const handlePermissionRetry = async () => {
+    permissionFlowRunningRef.current = false;
+    modalLockRef.current = false;
+
+    await wait(80);
+    await refreshBatteryOptimizationStatus();
+    await runPermissionSequence();
+  };
+
   const handleStart = async () => {
     if (!RunholicForeground?.startRun) {
-      showLockedAlert(
-        "러닝 시작 실패",
-        "네이티브 모듈이 아직 준비되지 않았습니다. 앱을 다시 열어주세요.",
-        [{ text: "확인" }]
-      );
       return;
     }
 
-    if (!permissionReady) {
+    if (
+      !permissionReady ||
+      !backgroundReady ||
+      !notificationReady ||
+      needsBatteryOptimization
+    ) {
       await runPermissionSequence();
       return;
     }
 
-    if (!gpsReady) {
-      showLockedAlert(
-        "GPS 준비 중",
-        "GPS 신호가 안정되면 러닝을 시작할 수 있습니다.",
-        [{ text: "확인" }]
-      );
-      return;
-    }
-
-    if (!notificationReady) {
-      showLockedAlert(
-        "알림 권한 필요",
-        "백그라운드 러닝 추적 상태를 표시하려면 알림 권한을 먼저 허용해주세요.",
-        [
-          { text: "취소", style: "cancel" },
-          {
-            text: "권한 허용",
-            onPress: async () => {
-              await requestNotificationPermission();
-            },
-          },
-        ]
-      );
-      return;
-    }
-
-    if (needsBatteryOptimization) {
-      showLockedAlert(
-        "배터리 최적화 예외 필요",
-        "화면이 꺼져도 러닝 기록과 음성 안내가 안정적으로 유지되도록, RUNHOLIC 앱의 배터리 사용 제한을 '제한 없음'으로 설정해야 러닝을 시작할 수 있습니다.",
-        [
-          { text: "취소", style: "cancel" },
-          {
-            text: "설정 열기",
-            onPress: async () => {
-              promptBatteryOptimizationSetup();
-            },
-          },
-        ]
-      );
-      return;
-    }
-
-    if (!currentLocation) {
-      showLockedAlert("위치 확인 중", "현재 위치를 먼저 잡아 주세요.", [
-        { text: "확인" },
-      ]);
+    if (!gpsReady || !currentLocation) {
+      await loadCurrentLocation();
       return;
     }
 
@@ -1371,7 +1673,7 @@ export default function RunningScreen() {
           },
         ]
       );
-    return;
+      return;
     }
 
     const runnerType = await getRunnerTypeFromHistory();
@@ -1390,18 +1692,11 @@ export default function RunningScreen() {
         runnerType,
         runnerTrait
       );
-
     } catch (error: any) {
       console.log("startRun error raw:", error);
       console.log("startRun error message:", error?.message);
       console.log("startRun error code:", error?.code);
       console.log("startRun error stack:", error?.stack);
-
-      showLockedAlert(
-        "러닝 시작 실패",
-        `${error?.code ?? "NO_CODE"}\n${error?.message ?? String(error)}`,
-        [{ text: "확인" }]
-      );
       return;
     }
 
@@ -1409,6 +1704,11 @@ export default function RunningScreen() {
     setFinishedSnapshot(null);
     setPrepExpanded(false);
     setLastValidPace(0);
+    didEnterFollowZoomRef.current = false;
+    didApplyFinishFitRef.current = false;
+    userMapInteractingRef.current = false;
+    lastUserMapTouchAtRef.current = 0;
+    setResumeGraceUntil(0);
 
     await refreshSession();
   };
@@ -1428,6 +1728,7 @@ export default function RunningScreen() {
   const handleResume = async () => {
     if (resumePending) return;
     setResumePending(true);
+    setResumeGraceUntil(Date.now() + 5000);
 
     try {
       await RunholicForeground.resumeRun();
@@ -1442,12 +1743,35 @@ export default function RunningScreen() {
     }
   };
 
+  const applyFinishFitOnce = (routeSegments?: RoutePoint[][]) => {
+    if (didApplyFinishFitRef.current) return;
+    if (!mapRef.current) return;
+
+    const segments = buildDisplaySegments(routeSegments ?? session?.routeSegments ?? []);
+    const flat = segments.flat();
+
+    if (flat.length < 2) return;
+
+    didApplyFinishFitRef.current = true;
+
+    mapRef.current.fitToCoordinates(flat, {
+      edgePadding: {
+        top: 30,
+        right: 30,
+        bottom: 30,
+        left: 30,
+      },
+      animated: false,
+    });
+  };
+
   const handleFinish = async () => {
     if (pendingFinish) return;
 
     try {
       setPendingFinish(true);
       await RunholicForeground.stopRun();
+      applyFinishFitOnce(session?.routeSegments);
     } catch (error) {
       console.log("stopRun error:", error);
       setPendingFinish(false);
@@ -1469,9 +1793,20 @@ export default function RunningScreen() {
     const finalizeRun = async () => {
       const finalRun = buildRunDataFromNative(session);
 
+      finalRun.aiCoachAnalysis = buildFinalAiCoachAnalysis({
+        runnerType: finalRun.runnerType,
+        distance: finalRun.distance,
+        duration: finalRun.duration,
+        cadence: finalRun.cadence,
+        elevationGain: finalRun.elevationGain,
+        elevationLoss: finalRun.elevationLoss,
+        splits: finalRun.splits,
+      });
+
       try {
         await saveLastRun(finalRun);
         await saveRunHistory(finalRun);
+
       } catch (error) {
         console.log("save result error:", error);
         if (!cancelled) {
@@ -1487,7 +1822,7 @@ export default function RunningScreen() {
 
       setFinishedSnapshot(finalRun);
 
-      if (finalRun.route.length) {
+      if (finalRun.route?.length) {
         setCurrentLocation(finalRun.route[finalRun.route.length - 1]);
       }
 
@@ -1506,15 +1841,24 @@ export default function RunningScreen() {
     };
   }, [pendingFinish, session]);
 
-  const handleViewResult = () => {
+  const handleViewResult = async () => {
     if (!lastFinishedRunId) return;
 
-    showInterstitial(() => {
+    await new Promise(r => setTimeout(r, 150));
+
+    try {
+      showInterstitial(() => {
+        router.replace({
+          pathname: "/result",
+          params: { id: lastFinishedRunId },
+        });
+      });
+    } catch {
       router.replace({
         pathname: "/result",
         params: { id: lastFinishedRunId },
       });
-    });
+    }
   };
 
   const confirmExitRunning = () => {
@@ -1550,14 +1894,34 @@ export default function RunningScreen() {
 
   const canStartRun =
     permissionReady &&
+    backgroundReady &&
     gpsReady &&
     notificationReady &&
     !needsBatteryOptimization &&
     !session?.isRunning &&
     (targetMode !== "custom" || resolvedTargetDistanceKm !== null);
 
+  const showPermissionRetryButton =
+    !session?.isRunning &&
+    (
+      !permissionReady ||
+      !backgroundReady ||
+      !notificationReady ||
+      needsBatteryOptimization ||
+      !gpsReady
+    );
+
+  useEffect(() => {
+    setStartButtonReady(canStartRun);
+  }, [canStartRun]);
+
   const displaySession =
     session?.isRunning || session?.isPaused ? session : finishedSnapshot;
+
+  const coachAnalysisText =
+    displaySession?.aiCoachAnalysis ??
+    finishedSnapshot?.aiCoachAnalysis ??
+    "러닝을 시작하면 AI코치 분석이 표시됩니다.";
 
   const displayDuration = (() => {
     if (!displaySession) return 0;
@@ -1576,21 +1940,15 @@ export default function RunningScreen() {
       ? displaySession.pace ?? 0
       : 0;
 
-  const shouldShowLivePace =
-    !!session?.isRunning && !session?.isPaused;
-
   const isResumeGrace =
     !!session?.isRunning &&
     !session?.isPaused &&
-    !!session?.resumedAt &&
-    Date.now() - session.resumedAt < 3000;
+    Date.now() < resumeGraceUntil;
 
   const displayCurrentPace =
-    session?.isPaused
+    session?.isPaused || isResumeGrace
       ? 0
-      : session?.currentPaceSec &&
-        session.currentPaceSec > 0 &&
-        isFinite(session.currentPaceSec)
+      : isUsableCurrentPace(session?.currentPaceSec)
       ? session.currentPaceSec
       : finishedSnapshot?.pace && finishedSnapshot.pace > 0
       ? finishedSnapshot.pace
@@ -1600,57 +1958,7 @@ export default function RunningScreen() {
     if (!currentLocation) {
       return (
         <View style={styles.mapLoadingCard}>
-          <Text style={styles.mapLoadingTitle}>러닝 준비 상태</Text>
-
-          <View style={styles.statusRow}>
-            <Text style={styles.statusLabel}>위치 권한</Text>
-            <Text style={styles.statusValue}>
-              {permissionReady ? "확인 완료" : "확인 중"}
-            </Text>
-          </View>
-
-          <View style={styles.statusRow}>
-            <Text style={styles.statusLabel}>백그라운드 권한</Text>
-            <Text style={styles.statusValue}>
-              {backgroundReady ? "확인 완료" : "확인 중 또는 미허용"}
-            </Text>
-          </View>
-
-          {Platform.OS === "android" && (
-            <View style={styles.statusRow}>
-              <Text style={styles.statusLabel}>알림 권한</Text>
-              <Text style={styles.statusValue}>
-                {notificationReady ? "확인 완료" : "권한 필요"}
-              </Text>
-            </View>
-          )}
-
-          <View style={styles.statusRow}>
-            <Text style={styles.statusLabel}>GPS 상태</Text>
-            <Text style={styles.statusValue}>
-              {gpsReady ? "준비 완료" : gpsTimeout ? "신호 약함" : "위치 확인 중"}
-            </Text>
-          </View>
-
-          <Text style={styles.mapLoadingDesc}>{locationStatusText}</Text>
-
-          {!permissionReady && (
-            <Pressable
-              style={styles.secondaryActionBtn}
-              onPress={runPermissionSequence}
-            >
-              <Text style={styles.secondaryActionText}>권한 순차 설정 시작</Text>
-            </Pressable>
-          )}
-
-          {permissionReady && Platform.OS === "android" && !notificationReady && (
-            <Pressable
-              style={styles.secondaryActionBtn}
-              onPress={requestNotificationPermission}
-            >
-              <Text style={styles.secondaryActionText}>알림 권한 허용</Text>
-            </Pressable>
-          )}
+          <Text style={styles.mapLoadingPlaceholder}>지도 로딩 중</Text>
         </View>
       );
     }
@@ -1658,13 +1966,15 @@ export default function RunningScreen() {
     const liveSession =
       session && (session.isRunning || session.isPaused) ? session : null;
 
-    const routeSegments =
-      liveSession?.routeSegments ??
-      (finishedSnapshot?.routeSegments ??
-        (finishedSnapshot?.route?.length ? [finishedSnapshot.route] : []));
+    const displayRouteSegments =
+      liveSession?.routeSegments != null
+        ? activeDisplayRouteSegments
+        : finishedDisplayRouteSegments;
 
-    const displayRouteSegments = buildDisplaySegments(routeSegments);
-    const flatRoute = displayRouteSegments.flat();
+    const flatRoute =
+      liveSession?.routeSegments != null
+        ? activeFlatRoute
+        : finishedFlatRoute;
 
     return (
       <View style={styles.mapWrap}>
@@ -1677,7 +1987,21 @@ export default function RunningScreen() {
             latitudeDelta: IDLE_MAP_DELTA,
             longitudeDelta: IDLE_MAP_DELTA,
           }}
+          onTouchStart={() => {
+            userMapInteractingRef.current = true;
+            lastUserMapTouchAtRef.current = Date.now();
+          }}
+          onPanDrag={() => {
+            userMapInteractingRef.current = true;
+            lastUserMapTouchAtRef.current = Date.now();
+          }}
+          onRegionChangeComplete={() => {
+            if (userMapInteractingRef.current) {
+              lastUserMapTouchAtRef.current = Date.now();
+            }
+          }}
         >
+
           {flatRoute.length > 0 && (
             <>
               {displayRouteSegments.map((segment, index) => (
@@ -1710,13 +2034,15 @@ export default function RunningScreen() {
     );
   };
 
+  void gpsTimeout;
+
   return (
     <SafeAreaView style={styles.safe}>
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{
           paddingTop: 6,
-          paddingBottom: insets.bottom,
+          paddingBottom: 24,
           paddingHorizontal: 16,
         }}
       >
@@ -1738,6 +2064,23 @@ export default function RunningScreen() {
           <View style={styles.headerSideButton} />
         </View>
 
+        <View style={styles.preMapStatusCard}>
+          <View style={styles.preMapStatusRow}>
+            <Text style={styles.preMapStatusText} numberOfLines={1}>
+              {prepStatusText}
+            </Text>
+
+            {showPermissionRetryButton && (
+              <Pressable
+                style={styles.retryBtn}
+                onPress={handlePermissionRetry}
+              >
+                <Text style={styles.retryBtnText}>권한 재요청</Text>
+              </Pressable>
+            )}
+          </View>
+        </View>
+
         {renderMap()}
 
         <View style={styles.cardRow}>
@@ -1754,7 +2097,7 @@ export default function RunningScreen() {
           </View>
 
           <View style={styles.halfCard}>
-            <Text style={styles.label}>시간</Text>
+            <Text style={styles.label}>러닝 시간</Text>
             <Text style={styles.value}>{formatDuration(displayDuration)}</Text>
           </View>
         </View>
@@ -1763,10 +2106,7 @@ export default function RunningScreen() {
           <View style={styles.halfCard}>
             <Text style={styles.label}>현재 페이스</Text>
             <Text style={styles.value}>
-              {formatPace(
-                isResumeGrace ? 0 : displayCurrentPace,
-                !!session?.isRunning && !session?.isPaused && !isResumeGrace
-              )}
+              {formatPace(displayCurrentPace)}
               /km
             </Text>
           </View>
@@ -1774,10 +2114,7 @@ export default function RunningScreen() {
           <View style={styles.halfCard}>
             <Text style={styles.label}>평균 페이스</Text>
             <Text style={styles.value}>
-              {formatPace(
-                displayAvgPace,
-                !!session?.isRunning
-              )}
+              {formatPace(displayAvgPace)}
               /km
             </Text>
           </View>
@@ -1858,7 +2195,10 @@ export default function RunningScreen() {
         <View style={styles.card}>
           <Pressable
             style={styles.prepHeaderRow}
-            onPress={() => setPrepExpanded((prev) => !prev)}
+            onPress={() => {
+              userToggledPrepRef.current = true;
+              setPrepExpanded((prev) => !prev);
+            }}
           >
             <View style={styles.prepHeaderTextWrap}>
               <Text style={styles.prepHeaderTitle}>러닝 준비 설정</Text>
@@ -1961,7 +2301,7 @@ export default function RunningScreen() {
                       targetMode === "21.1" && styles.goalChipTextActive,
                     ]}
                   >
-                    하프 21.1
+                    하프 21.10km
                   </Text>
                 </Pressable>
 
@@ -1978,7 +2318,7 @@ export default function RunningScreen() {
                       targetMode === "42.2" && styles.goalChipTextActive,
                     ]}
                   >
-                    풀 42.2
+                    풀 42.20km
                   </Text>
                 </Pressable>
               </View>
@@ -2005,7 +2345,7 @@ export default function RunningScreen() {
                   <TextInput
                     value={customTargetText}
                     onChangeText={setCustomTargetText}
-                    placeholder="예: 7.5"
+                    placeholder="예: 7 또는 7.53"
                     placeholderTextColor="#7F8AA3"
                     keyboardType="decimal-pad"
                     style={styles.goalInput}
@@ -2015,7 +2355,7 @@ export default function RunningScreen() {
 
               <Text style={styles.goalHint}>
                 {resolvedTargetDistanceKm
-                  ? `현재 목표 거리: ${resolvedTargetDistanceKm}km`
+                  ? `현재 목표 거리: ${resolvedTargetDistanceKm.toFixed(2)}km`
                   : "현재 목표 거리: 자유 러닝"}
               </Text>
             </View>
@@ -2051,74 +2391,26 @@ export default function RunningScreen() {
                 </View>
               </View>
             </View>
-
-            {Platform.OS === "android" && needsBatteryOptimization && (
-              <View style={styles.card}>
-                <Text style={styles.label}>백그라운드 절전 예외</Text>
-                <Text style={styles.goalHint}>
-                  배터리 최적화 예외 설정이 완료되어야
-                  {"\n"}
-                  러닝을 시작할 수 있습니다.
-                  {"\n"}
-                  화면이 꺼져도 추적과 음성 안내가 안정적으로 유지되도록
-                  {"\n"}
-                  RUNHOLIC 앱을 '제한 없음'으로 설정해 주세요.
-                </Text>
-                <Pressable
-                  style={styles.secondaryActionBtn}
-                  onPress={promptBatteryOptimizationSetup}
-                >
-                  <Text style={styles.secondaryActionText}>설정 열기</Text>
-                </Pressable>
-              </View>
-            )}
-
-            {Platform.OS === "android" && !notificationReady && (
-              <View style={styles.card}>
-                <Text style={styles.label}>상태표시줄 알림 권한</Text>
-                <Text style={styles.goalHint}>
-                  RUNHOLIC 앱을 닫아도 러닝 데이터 추적은 계속됩니다. 러닝을
-                  완전히 종료하려면 앱 안에서 종료 버튼을 눌러주세요.
-                </Text>
-                <Pressable
-                  style={styles.secondaryActionBtn}
-                  onPress={requestNotificationPermission}
-                >
-                  <Text style={styles.secondaryActionText}>알림 권한 허용</Text>
-                </Pressable>
-              </View>
-            )}
           </>
         )}
 
-        {displaySession && (
+        {session && (session.isRunning || session.isPaused) && (
           <View style={styles.card}>
             <Text style={styles.label}>목표 거리</Text>
             <Text style={styles.coachText}>
-              {"targetDistanceKm" in displaySession &&
-              displaySession.targetDistanceKm > 0
-                ? `${displaySession.targetDistanceKm.toFixed(1)}km 목표 러닝`
-                : "자유 러닝"}
-              {"targetDistanceKm" in displaySession &&
-              displaySession.targetDistanceKm > 0
-                ? `  ·  남은 거리 ${Math.max(
-                    (displaySession.remainingDistanceKm ?? 0),
+              {session.targetDistanceKm > 0
+                ? `${session.targetDistanceKm.toFixed(2)}km 목표 러닝  ·  남은 거리 ${Math.max(
+                    session.remainingDistanceKm ?? 0,
                     0
                   ).toFixed(2)}km`
-                : ""}
+                : "자유 러닝"}
             </Text>
           </View>
         )}
 
         <View style={styles.card}>
           <Text style={styles.label}>AI코치 분석</Text>
-          <Text style={styles.coachText}>
-            {"aiCoachAnalysis" in (displaySession ?? {})
-              ? (displaySession as any).aiCoachAnalysis ??
-                "러닝을 시작하면 AI코치 분석이 표시됩니다."
-              : finishedSnapshot?.aiCoachAnalysis ??
-                "러닝을 시작하면 AI코치 분석이 표시됩니다."}
-          </Text>
+          <Text style={styles.coachText}>{coachAnalysisText}</Text>
         </View>
 
         <View style={styles.card}>
@@ -2147,7 +2439,7 @@ export default function RunningScreen() {
                 const prevSplit =
                   index > 0 ? displaySession.splits[index - 1] : null;
                 const paceDeltaSec = prevSplit
-                  ? split.avgPaceSec - prevSplit.avgPaceSec
+                  ? Math.floor(split.avgPaceSec) - Math.floor(prevSplit.avgPaceSec)
                   : null;
 
                 const elevationGainM = split.elevationGainM ?? 0;
@@ -2155,8 +2447,7 @@ export default function RunningScreen() {
 
                 const gain = Math.max(0, Math.round(elevationGainM));
                 const loss = Math.max(0, Math.round(elevationLossM));
-                const isFlat = gain === 0 && loss === 0;
-
+                
                 return (
                   <View
                     key={`split-${split.km}`}
@@ -2197,7 +2488,9 @@ export default function RunningScreen() {
                         styles.splitElev,
                       ]}
                     >
-                      {isFlat ? "—" : <>▲{gain}m{" "}▼{loss}m</>}
+                      <>
+                        ▲{gain}m{"\n"}▼{loss}m
+                      </>
                     </Text>
                   </View>
                 );
@@ -2220,15 +2513,15 @@ export default function RunningScreen() {
               <Pressable
                 style={[
                   styles.thirdBtnPrimary,
-                  !canStartRun && styles.disabledBtn,
+                  !startButtonReady && styles.disabledBtn,
                 ]}
                 onPress={handleStart}
-                disabled={!canStartRun}
+                disabled={!startButtonReady}
               >
                 <Text
                   style={[
                     styles.primaryText,
-                    !canStartRun && styles.disabledPrimaryText,
+                    !startButtonReady && styles.disabledPrimaryText,
                   ]}
                 >
                   러닝 시작
@@ -2322,6 +2615,13 @@ export default function RunningScreen() {
             시계 이외의 계기판 표시가 잠시 지연될 수 있지만
             {"\n"}
             데이터는 정상 집계 중이므로 안심하세요.
+            {"\n"}
+            {"\n"}
+            고도 변화는 오차 보정을 위해 일정 거리 이동 후 반영됩니다.
+            {"\n"}
+            건물이나 나무가 밀집한 구간에서는
+            {"\n"}
+            걷거나 저속 이동 시 고도 값에 오차가 발생할 수 있습니다.
           </Text>
         </View>
       </ScrollView>
@@ -2339,10 +2639,13 @@ function formatDuration(sec: number) {
   )}:${String(s).padStart(2, "0")}`;
 }
 
-function formatPace(sec: number, isRunning: boolean) {
-  if (!sec || !isFinite(sec)) {
-    return isRunning ? "00:00" : "--:--";
-  }
+function isUsableCurrentPace(sec: number | null | undefined) {
+  return !!sec && Number.isFinite(sec) && sec > 0 && sec <= 3600;
+}
+
+function formatPace(sec: number) {
+  if (!sec || !isFinite(sec)) return "--:--";
+
   const totalSec = Math.floor(sec);
   const m = Math.floor(totalSec / 60);
   const s = totalSec % 60;
@@ -2424,27 +2727,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     marginBottom: 12,
   },
-  mapLoadingTitle: {
-    color: "#FFFFFF",
-    fontSize: 16,
-    fontWeight: "700",
-    marginBottom: 10,
-  },
-  mapLoadingDesc: {
-    color: "#D8DEEA",
-    fontSize: 14,
-    lineHeight: 20,
-    marginTop: 6,
-  },
-
-  statusRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 4,
-  },
-  statusLabel: { color: "#AAB3C5", fontSize: 13 },
-  statusValue: { color: "#FFFFFF", fontSize: 13, fontWeight: "700" },
 
   cardRow: {
     flexDirection: "row",
@@ -2581,7 +2863,7 @@ const styles = StyleSheet.create({
 
   splitDeltaFaster: {
     fontSize: 14,
-    color: "#4DA6FF",
+    color: "#22C55E",
     fontWeight: "800",
   },
 
@@ -2593,7 +2875,7 @@ const styles = StyleSheet.create({
 
   splitDeltaNeutral: {
     fontSize: 14,
-    color: "#AAB3C5",
+    color: "#DCE6FF",
     fontWeight: "800",
   },
 
@@ -2735,21 +3017,6 @@ const styles = StyleSheet.create({
     marginHorizontal: 10,
   },
 
-  secondaryActionBtn: {
-    marginTop: 12,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: "#26304D",
-    borderWidth: 1,
-    borderColor: "#2A3555",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  secondaryActionText: {
-    color: "#FFFFFF",
-    fontSize: 14,
-    fontWeight: "800",
-  },
   backgroundNotice: {
     marginTop: 8,
     fontSize: 12.5,
@@ -2757,5 +3024,49 @@ const styles = StyleSheet.create({
     textAlign: "center",
     lineHeight: 18,
     paddingHorizontal: 10,
+  },
+
+  preMapStatusCard: {
+    backgroundColor: "#151C31",
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#2A3555",
+    paddingVertical: 3,
+    paddingHorizontal: 10,
+    marginBottom: 10,
+  },
+
+  preMapStatusRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    height: 28,
+  },
+
+  preMapStatusText: {
+    flex: 1,
+    fontSize: 12,
+    color: "#AAB3C5",
+    lineHeight: 16,
+  },
+
+  retryBtn: {
+    marginLeft: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 8,
+    backgroundColor: "#2A3550",
+  },
+
+  retryBtnText: {
+    fontSize: 12,
+    color: "#7DD3FC",
+    fontWeight: "600",
+  },
+
+  mapLoadingPlaceholder: {
+    color: "#AAB3C5",
+    fontSize: 14,
+    fontWeight: "800",
+    textAlign: "center",
   },
 });

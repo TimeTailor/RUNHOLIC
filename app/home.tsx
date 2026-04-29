@@ -26,6 +26,7 @@ const EMPTY_RUN: RunData = {
   id: "empty",
   dateTimeText: "----. --. --. --:--:-- ~ --:--:--",
   startedAt: "",
+  endedAt: "",
   distance: 0,
   pace: 0,
   duration: 0,
@@ -54,31 +55,39 @@ export default function HomeScreen() {
   const displayRun = lastRun ?? EMPTY_RUN;
 
   const routeSegments =
-    displayRun.routeSegments ?? (displayRun.route.length ? [displayRun.route] : []);
+    displayRun.routeSegments ?? (displayRun.route?.length ? [displayRun.route] : []);
   const flatRoute = routeSegments.flat();
   const hasAnyRun = !!lastRun;
   const hasRoute = flatRoute.length >= 1;
 
   const mapRegion = useMemo(() => {
     if (flatRoute.length > 0) {
+      const lats = flatRoute.map((p) => p.latitude);
+      const lngs = flatRoute.map((p) => p.longitude);
+
+      const minLat = Math.min(...lats);
+      const maxLat = Math.max(...lats);
+      const minLng = Math.min(...lngs);
+      const maxLng = Math.max(...lngs);
+
+      const centerLat = (minLat + maxLat) / 2;
+      const centerLng = (minLng + maxLng) / 2;
+
+      const latDelta = Math.max((maxLat - minLat) * 1.8, 0.0025);
+      const lngDelta = Math.max((maxLng - minLng) * 1.8, 0.0025);
+
       return {
-        latitude: flatRoute[0].latitude,
-        longitude: flatRoute[0].longitude,
-        latitudeDelta: 0.008,
-        longitudeDelta: 0.008,
+        latitude: centerLat,
+        longitude: centerLng,
+        latitudeDelta: latDelta,
+        longitudeDelta: lngDelta,
       };
     }
-
-    return {
-      latitude: 37.5665,
-      longitude: 126.978,
-      latitudeDelta: 0.02,
-      longitudeDelta: 0.02,
-    };
-  }, [displayRun]);
+    return null;
+  }, [flatRoute]);
 
   const dateTimeRangeText = displayRun.startedAt
-    ? formatRunDateTimeRange(displayRun.startedAt, displayRun.duration)
+    ? formatRunDateTimeRange(displayRun.startedAt, displayRun.endedAt)
     : displayRun.dateTimeText;
 
   const handleGoRunning = () => {
@@ -108,7 +117,7 @@ export default function HomeScreen() {
           styles.content,
           {
             paddingTop: 12,
-            paddingBottom: insets.bottom + 16,
+            paddingBottom: 24,
           },
         ]}
       >
@@ -121,8 +130,11 @@ export default function HomeScreen() {
             />
           </View>
 
-          <Pressable onPress={() => router.push("/profile-setup")}>
-            <Text style={styles.editText}>프로필 입력/수정</Text>
+          <Pressable
+            style={styles.profileBtn}
+            onPress={() => router.push("/profile-setup")}
+          >
+            <Text style={styles.profileBtnText}>프로필 입력/수정</Text>
           </Pressable>
         </View>
 
@@ -163,7 +175,7 @@ export default function HomeScreen() {
             </View>
 
             <View style={styles.infoCard}>
-              <Text style={styles.infoLabel}>총 시간</Text>
+              <Text style={styles.infoLabel}>총 러닝 시간</Text>
               <Text style={styles.infoValue}>
                 {formatDuration(displayRun.duration)}
               </Text>
@@ -306,19 +318,12 @@ const styles = StyleSheet.create({
   logo: {
     width: 130,
     height: 21,
-    marginTop: 6,
+    marginTop: 5,
     marginBottom: 4,
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.25,
     shadowRadius: 2,
-  },
-
-  editText: {
-    color: "#DCE6FF",
-    fontSize: 13,
-    fontWeight: "700",
-    marginTop: 0,
   },
 
   profileCard: {
@@ -483,5 +488,18 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     fontSize: 14,
     lineHeight: 20,
+  },
+
+  profileBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    backgroundColor: "#2A3550",
+  },
+
+  profileBtnText: {
+    fontSize: 13,
+    color: "#7DD3FC",
+    fontWeight: "600",
   },
 });

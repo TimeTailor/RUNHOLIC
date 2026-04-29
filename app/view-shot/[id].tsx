@@ -79,18 +79,12 @@ export default function ViewShotScreen() {
         longitudeDelta: lngDelta,
       };
     }
-
-    return {
-      latitude: 37.5665,
-      longitude: 126.978,
-      latitudeDelta: 0.02,
-      longitudeDelta: 0.02,
-    };
+    return null;
   }, [run]);
 
   const dateText = useMemo(() => {
     if (!run) return "";
-    return formatRunDateTimeRange(run.startedAt, run.duration);
+    return formatRunDateTimeRange(run.startedAt, run.endedAt);
   }, [run]);
 
   useEffect(() => {
@@ -103,9 +97,17 @@ export default function ViewShotScreen() {
     mapRegion.longitudeDelta,
   ]);
 
-  const previewWidth = Math.max(windowWidth - 32, 1) * 0.85;
+  const previewWidth = Math.max((windowWidth - 32) * 0.85, 1);
   const previewScale = previewWidth / CANVAS_W;
-  const previewHeight = CANVAS_H * previewScale;
+  const previewHeight = Math.max(Math.round(CANVAS_H * previewScale), 1);
+
+  const isPreviewReady =
+    Number.isFinite(previewWidth) &&
+    previewWidth > 0 &&
+    Number.isFinite(previewScale) &&
+    previewScale > 0 &&
+    Number.isFinite(previewHeight) &&
+    previewHeight > 0;
 
   const captureImage = async () => {
     if (!shotRef.current || !run) return null;
@@ -342,21 +344,41 @@ export default function ViewShotScreen() {
               borderRadius: 18,
             }}
           >
-            <View
-              pointerEvents="none"
-              style={{
-                width: CANVAS_W,
-                height: CANVAS_H,
-                transform: [{ scale: previewScale }],
-                transformOrigin: "top left" as any,
-              }}
-            >
-              <ShotCanvas
-                run={run}
-                dateText={dateText}
-                mapRegion={mapRegion}
-              />
-            </View>
+            {isPreviewReady ? (
+              <View
+                pointerEvents="none"
+                style={{
+                  width: CANVAS_W,
+                  height: CANVAS_H,
+                  transform: [{ scale: previewScale }],
+                  transformOrigin: "top left" as any,
+                }}
+              >
+                <ShotCanvas
+                  run={run}
+                  dateText={dateText}
+                  mapRegion={mapRegion}
+                />
+              </View>
+            ) : (
+              <View
+                style={{
+                  flex: 1,
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                <Text
+                  style={{
+                    color: "#9CA3AF",
+                    fontSize: 14,
+                    fontWeight: "600",
+                  }}
+                >
+                  미리보기 준비 중...
+                </Text>
+              </View>
+            )}
           </View>
 
           <View style={styles.buttonRow}>
@@ -420,7 +442,7 @@ function ShotCanvas({
   onCaptureMapReady?: () => void;
 }) {
   const routeSegments =
-    run.routeSegments ?? (run.route.length ? [run.route] : []);
+    run.routeSegments ?? (run.route?.length ? [run.route] : []);
   const flatRoute = routeSegments.flat();
   const hasRoute = flatRoute.length >= 1;
   return (
@@ -460,7 +482,6 @@ function ShotCanvas({
             )}
           </MapView>
         )}
-
         <View pointerEvents="none" style={canvas.mapFrame} />
       </View>
 
@@ -469,17 +490,26 @@ function ShotCanvas({
           <Item
             label="총 거리"
             value={`${run.distance.toFixed(2)} km`}
+            align="left"
           />
-          <Item label="총 시간" value={formatDuration(run.duration)} />
+          <Item
+            label="총 러닝 시간"
+            value={formatDuration(run.duration)}
+            align="right"
+          />
         </View>
 
         <View style={canvas.row}>
           <Item
             label="평균 페이스"
             value={`${formatPace(run.pace)}/km`}
+            align="left"
           />
           <Item
-            label="평균 케이던스" value={`${Math.round(run.cadence)} spm`} />
+            label="평균 케이던스"
+            value={`${Math.round(run.cadence)} spm`}
+            align="right"
+          />
         </View>
 
         <View style={canvas.rowLast}>
@@ -495,9 +525,13 @@ function ShotCanvas({
                 m
               </Text>
             }
+            align="left"
           />
-
-          <Item label="칼로리" value={`${Math.round(run.calories)} kcal`} />
+          <Item
+            label="칼로리"
+            value={`${Math.round(run.calories)} kcal`}
+            align="right"
+          />
         </View>
       </View>
 
@@ -513,16 +547,31 @@ function Item({
   label,
   value,
   style,
+  align = "left",
 }: {
   label: string;
   value: React.ReactNode;
   style?: any;
+  align?: "left" | "right";
 }) {
+  const isRight = align === "right";
+
   return (
-    <View style={[canvas.item, style]}>
-      <Text style={canvas.label}>{label}</Text>
+    <View
+      style={[
+        canvas.item,
+        isRight ? canvas.itemRight : canvas.itemLeft,
+        style,
+      ]}
+    >
+      <Text style={[canvas.label, isRight && canvas.labelRight]}>
+        {label}
+      </Text>
+
       {typeof value === "string" ? (
-        <Text style={canvas.value}>{value}</Text>
+        <Text style={[canvas.value, isRight && canvas.valueRight]}>
+          {value}
+        </Text>
       ) : (
         value
       )}
@@ -664,8 +713,8 @@ const canvas = StyleSheet.create({
     width: CANVAS_W,
     height: CANVAS_H,
     backgroundColor: "#0B1020",
-    paddingTop: 110,
-    paddingBottom: 40,
+    paddingTop: 150,
+    paddingBottom: 0,
     paddingHorizontal: 44,
   },
 
@@ -703,7 +752,7 @@ const canvas = StyleSheet.create({
   card: {
     backgroundColor: "#151C31",
     borderRadius: 34,
-    paddingHorizontal: 40,
+    paddingHorizontal: 70,
     paddingVertical: 48,
     borderWidth: 2,
     borderColor: "#2A3555",
@@ -713,21 +762,29 @@ const canvas = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     marginBottom: 44,
-    paddingLeft: 68,
-    paddingRight: 4,
+    paddingLeft: 0,
+    paddingRight: 0,
   },
 
   rowLast: {
     flexDirection: "row",
     justifyContent: "space-between",
-    paddingLeft: 68,
-    paddingRight: 4,
+    paddingLeft: 0,
+    paddingRight: 0,
   },
 
   item: {
     width: "48%",
     minHeight: 150,
     justifyContent: "center",
+  },
+
+  itemLeft: {
+    alignItems: "flex-start",
+  },
+
+  itemRight: {
+    alignItems: "flex-end",
   },
 
   label: {
@@ -737,12 +794,20 @@ const canvas = StyleSheet.create({
     marginBottom: 18,
   },
 
+  labelRight: {
+    textAlign: "right",
+  },
+
   value: {
     color: "#FFFFFF",
     fontSize: 70,
     fontWeight: "800",
     lineHeight: 78,
     textAlignVertical: "center",
+  },
+
+  valueRight: {
+    textAlign: "right",
   },
 
   valueElevation: {
